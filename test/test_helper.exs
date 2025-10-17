@@ -19,11 +19,25 @@ defmodule TestHelper do
   end
 end
 
-# Ensure application is started
+# Ensure application is started (but no test servers yet)
 {:ok, _} = Application.ensure_all_started(:reverse_it)
 
-# Give servers a moment to initialize
-Process.sleep(200)
+# Explicitly start test servers under the supervisor
+IO.puts("Starting test servers...")
+
+# Start backend server on port 4001
+{:ok, _backend_pid} =
+  Supervisor.start_child(
+    ReverseIt.Supervisor,
+    {Bandit, plug: ReverseIt.TestBackend, scheme: :http, port: 4001}
+  )
+
+# Start proxy server on port 4000
+{:ok, _proxy_pid} =
+  Supervisor.start_child(
+    ReverseIt.Supervisor,
+    {Bandit, plug: ReverseIt.TestProxy, scheme: :http, port: 4000}
+  )
 
 # Wait for both servers to be ready
 IO.puts("Waiting for test servers to start...")
