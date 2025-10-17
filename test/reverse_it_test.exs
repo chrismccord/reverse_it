@@ -81,11 +81,8 @@ defmodule ReverseItTest do
     end
 
     @tag :websocket
-    @tag :skip  # Skip until WebSocket proxy is fully debugged
     test "proxies WebSocket messages bidirectionally" do
-      # This test would verify full WebSocket proxying
-      # Once the async initialization is fixed
-
+      # Connect to proxy which will forward to backend
       {:ok, conn} = Mint.HTTP.connect(:http, "localhost", 4000)
       {:ok, conn, ref} = Mint.WebSocket.upgrade(:ws, conn, "/ws", [])
 
@@ -93,52 +90,297 @@ defmodule ReverseItTest do
       {:ok, conn, websocket} = wait_for_ws_upgrade(conn, ref, 5000)
 
       # Send message
-      {:ok, _websocket, data} = Mint.WebSocket.encode(websocket, {:text, "Hello from test!"})
+      {:ok, websocket, data} = Mint.WebSocket.encode(websocket, {:text, "Hello from test!"})
       {:ok, conn} = Mint.WebSocket.stream_request_body(conn, ref, data)
 
-      # Receive response
-      assert_receive message, 2000
-      {:ok, conn, responses} = Mint.WebSocket.stream(conn, message)
+      # Receive response (backend echoes with prefix)
+      {conn, websocket, received_data} = receive_ws_data(conn, websocket, ref, 2000)
 
-      # Should have data response
-      assert Enum.any?(responses, fn
-        {:data, ^ref, _data} -> true
+      # Decode and verify
+      {:ok, _websocket, frames} = Mint.WebSocket.decode(websocket, received_data)
+
+      text_frames = Enum.filter(frames, fn
+        {:text, _} -> true
+        _ -> false
+      end)
+
+      assert length(text_frames) > 0
+      {:text, text} = hd(text_frames)
+      assert text == "Backend echo: Hello from test!"
+
+      # Send another message to verify continued operation
+      {:ok, websocket, data} = Mint.WebSocket.encode(websocket, {:text, "Second message"})
+      {:ok, conn} = Mint.WebSocket.stream_request_body(conn, ref, data)
+
+      # Receive second response
+      {conn, websocket, received_data} = receive_ws_data(conn, websocket, ref, 2000)
+      {:ok, _websocket, frames} = Mint.WebSocket.decode(websocket, received_data)
+
+      text_frames = Enum.filter(frames, fn
+        {:text, _} -> true
+        _ -> false
+      end)
+
+      assert length(text_frames) > 0
+      {:text, text} = hd(text_frames)
+      assert text == "Backend echo: Second message"
+
+      # Close connection
+      {:ok, _websocket, data} = Mint.WebSocket.encode(websocket, :close)
+      Mint.WebSocket.stream_request_body(conn, ref, data)
+      Mint.HTTP.close(conn)
+    end
+
+    @tag :websocket
+    test "proxies binary WebSocket frames" do
+      {:ok, conn} = Mint.HTTP.connect(:http, "localhost", 4000)
+      {:ok, conn, ref} = Mint.WebSocket.upgrade(:ws, conn, "/ws", [])
+      {:ok, conn, websocket} = wait_for_ws_upgrade(conn, ref, 5000)
+
+      # Send binary data
+      binary_data = <<1, 2, 3, 4, 5>>
+      {:ok, websocket, data} = Mint.WebSocket.encode(websocket, {:binary, binary_data})
+      {:ok, conn} = Mint.WebSocket.stream_request_body(conn, ref, data)
+
+      # Receive echoed binary
+      {conn, websocket, received_data} = receive_ws_data(conn, websocket, ref, 2000)
+      {:ok, _websocket, frames} = Mint.WebSocket.decode(websocket, received_data)
+
+      # Backend echoes binary frames as-is
+      assert {:binary, ^binary_data} = hd(frames)
+
+      Mint.HTTP.close(conn)
+    end
+
+    @tag :websocket
+    test "proxies ping/pong frames" do
+      {:ok, conn} = Mint.HTTP.connect(:http, "localhost", 4000)
+      {:ok, conn, ref} = Mint.WebSocket.upgrade(:ws, conn, "/ws", [])
+      {:ok, conn, websocket} = wait_for_ws_upgrade(conn, ref, 5000)
+
+      # Send ping
+      {:ok, websocket, data} = Mint.WebSocket.encode(websocket, {:ping, "test"})
+      {:ok, conn} = Mint.WebSocket.stream_request_body(conn, ref, data)
+
+      # Should receive pong back
+      {_conn, _websocket, received_data} = receive_ws_data(conn, websocket, ref, 2000)
+      {:ok, _websocket, frames} = Mint.WebSocket.decode(websocket, received_data)
+
+      # Backend should respond with pong
+      assert Enum.any?(frames, fn
+        {:pong, "test"} -> true
         _ -> false
       end)
 
       Mint.HTTP.close(conn)
     end
+
+    @tag :websocket
+    test "handles multiple simultaneous WebSocket connections" do
+      # Test that two independent connections can exist simultaneously
+      # We'll test them sequentially to avoid message ordering issues
+
+      # Create first connection
+      {:ok, conn1} = Mint.HTTP.connect(:http, "localhost", 4000)
+      {:ok, conn1, ref1} = Mint.WebSocket.upgrade(:ws, conn1, "/ws", [])
+      {:ok, conn1, websocket1} = wait_for_ws_upgrade(conn1, ref1, 5000)
+
+      # Create second connection while first is still open
+      {:ok, conn2} = Mint.HTTP.connect(:http, "localhost", 4000)
+      {:ok, conn2, ref2} = Mint.WebSocket.upgrade(:ws, conn2, "/ws", [])
+      {:ok, conn2, websocket2} = wait_for_ws_upgrade(conn2, ref2, 5000)
+
+      # Both connections established - now test each independently
+      # Test conn1
+      {:ok, websocket1, data1} = Mint.WebSocket.encode(websocket1, {:text, "From conn1"})
+      {:ok, conn1} = Mint.WebSocket.stream_request_body(conn1, ref1, data1)
+      {_conn1, _websocket1, received1} = receive_ws_data(conn1, websocket1, ref1, 5000)
+      {:ok, _websocket1, frames1} = Mint.WebSocket.decode(websocket1, received1)
+      {:text, text1} = hd(Enum.filter(frames1, fn {:text, _} -> true; _ -> false end))
+      assert text1 == "Backend echo: From conn1"
+
+      # Test conn2
+      {:ok, websocket2, data2} = Mint.WebSocket.encode(websocket2, {:text, "From conn2"})
+      {:ok, conn2} = Mint.WebSocket.stream_request_body(conn2, ref2, data2)
+      {_conn2, _websocket2, received2} = receive_ws_data(conn2, websocket2, ref2, 5000)
+      {:ok, _websocket2, frames2} = Mint.WebSocket.decode(websocket2, received2)
+      {:text, text2} = hd(Enum.filter(frames2, fn {:text, _} -> true; _ -> false end))
+      assert text2 == "Backend echo: From conn2"
+
+      Mint.HTTP.close(conn1)
+      Mint.HTTP.close(conn2)
+    end
+
+    @tag :websocket
+    test "handles large WebSocket messages" do
+      {:ok, conn} = Mint.HTTP.connect(:http, "localhost", 4000)
+      {:ok, conn, ref} = Mint.WebSocket.upgrade(:ws, conn, "/ws", [])
+      {:ok, conn, websocket} = wait_for_ws_upgrade(conn, ref, 5000)
+
+      # Send a large message (10KB to avoid fragmentation issues in test)
+      large_text = String.duplicate("A", 10_000)
+      {:ok, websocket, data} = Mint.WebSocket.encode(websocket, {:text, large_text})
+      {:ok, conn} = Mint.WebSocket.stream_request_body(conn, ref, data)
+
+      # Receive echoed large message (may come in multiple data chunks)
+      messages = collect_messages(conn, websocket, ref, [], 1, 5000)
+
+      assert length(messages) > 0
+      text = hd(messages)
+      assert String.starts_with?(text, "Backend echo: ")
+      assert String.length(text) > 10_000
+
+      Mint.HTTP.close(conn)
+    end
+
+    @tag :websocket
+    test "handles rapid successive messages" do
+      {:ok, conn} = Mint.HTTP.connect(:http, "localhost", 4000)
+      {:ok, conn, ref} = Mint.WebSocket.upgrade(:ws, conn, "/ws", [])
+      {:ok, conn, websocket} = wait_for_ws_upgrade(conn, ref, 5000)
+
+      # Send 10 messages rapidly without waiting for responses
+      messages = for i <- 1..10, do: "Message #{i}"
+
+      {conn, websocket} =
+        Enum.reduce(messages, {conn, websocket}, fn msg, {c, ws} ->
+          {:ok, ws, data} = Mint.WebSocket.encode(ws, {:text, msg})
+          {:ok, c} = Mint.WebSocket.stream_request_body(c, ref, data)
+          {c, ws}
+        end)
+
+      # Collect all responses
+      received_messages = collect_messages(conn, websocket, ref, [], 10, 5000)
+
+      # Should receive all 10 echoed messages
+      assert length(received_messages) == 10
+
+      # Verify each message is present
+      for i <- 1..10 do
+        expected = "Backend echo: Message #{i}"
+        assert expected in received_messages
+      end
+
+      Mint.HTTP.close(conn)
+    end
+
+    @tag :websocket
+    test "handles empty text frame" do
+      {:ok, conn} = Mint.HTTP.connect(:http, "localhost", 4000)
+      {:ok, conn, ref} = Mint.WebSocket.upgrade(:ws, conn, "/ws", [])
+      {:ok, conn, websocket} = wait_for_ws_upgrade(conn, ref, 5000)
+
+      # Send empty text frame
+      {:ok, websocket, data} = Mint.WebSocket.encode(websocket, {:text, ""})
+      {:ok, conn} = Mint.WebSocket.stream_request_body(conn, ref, data)
+
+      # Should receive empty echo
+      {_conn, _websocket, received_data} = receive_ws_data(conn, websocket, ref, 2000)
+      {:ok, _websocket, frames} = Mint.WebSocket.decode(websocket, received_data)
+
+      {:text, text} = hd(Enum.filter(frames, fn {:text, _} -> true; _ -> false end))
+      assert text == "Backend echo: "
+
+      Mint.HTTP.close(conn)
+    end
+
   end
 
   # Helper for WebSocket upgrade
   defp wait_for_ws_upgrade(conn, ref, timeout) do
+    wait_for_ws_upgrade(conn, ref, timeout, nil, nil)
+  end
+
+  defp wait_for_ws_upgrade(conn, ref, timeout, status, headers) do
     receive do
       message ->
         case Mint.WebSocket.stream(conn, message) do
           {:ok, conn, responses} ->
-            case process_upgrade(responses, conn, ref) do
+            case process_upgrade(responses, conn, ref, status, headers) do
               {:ok, conn, websocket} -> {:ok, conn, websocket}
-              :continue -> wait_for_ws_upgrade(conn, ref, timeout)
+              {:continue, conn, status, headers} -> wait_for_ws_upgrade(conn, ref, timeout, status, headers)
             end
 
           :unknown ->
-            wait_for_ws_upgrade(conn, ref, timeout)
+            wait_for_ws_upgrade(conn, ref, timeout, status, headers)
         end
     after
       timeout -> {:error, :timeout}
     end
   end
 
-  defp process_upgrade([], conn, _ref), do: {:continue, conn}
+  defp process_upgrade([], conn, _ref, nil, _headers), do: {:continue, conn, nil, nil}
+  defp process_upgrade([], conn, _ref, _status, nil), do: {:continue, conn, nil, nil}
 
-  defp process_upgrade([{:done, ref} | _rest], conn, ref) do
-    case Mint.WebSocket.new(conn, ref, :client, []) do
+  defp process_upgrade([], conn, ref, status, headers) do
+    # Have both status and headers, create WebSocket
+    case Mint.WebSocket.new(conn, ref, status, headers) do
       {:ok, conn, websocket} -> {:ok, conn, websocket}
-      {:error, _conn, _reason} -> :continue
+      {:error, _conn, _reason} -> {:continue, conn, status, headers}
     end
   end
 
-  defp process_upgrade([_response | rest], conn, ref) do
-    process_upgrade(rest, conn, ref)
+  defp process_upgrade([{:status, ref, status} | rest], conn, ref, _prev_status, headers) do
+    process_upgrade(rest, conn, ref, status, headers)
+  end
+
+  defp process_upgrade([{:headers, ref, headers} | rest], conn, ref, status, _prev_headers) do
+    process_upgrade(rest, conn, ref, status, headers)
+  end
+
+  defp process_upgrade([{:done, ref} | rest], conn, ref, status, headers) do
+    process_upgrade(rest, conn, ref, status, headers)
+  end
+
+  defp process_upgrade([_response | rest], conn, ref, status, headers) do
+    process_upgrade(rest, conn, ref, status, headers)
+  end
+
+  defp receive_ws_data(conn, websocket, ref, timeout) do
+    receive do
+      message ->
+        case Mint.WebSocket.stream(conn, message) do
+          {:ok, conn, responses} ->
+            case find_data_response(responses, ref) do
+              {:ok, data} -> {conn, websocket, data}
+              :not_found -> receive_ws_data(conn, websocket, ref, timeout)
+            end
+
+          :unknown ->
+            receive_ws_data(conn, websocket, ref, timeout)
+        end
+    after
+      timeout -> raise "Timeout waiting for WebSocket data"
+    end
+  end
+
+  defp find_data_response([], _ref), do: :not_found
+
+  defp find_data_response([{:data, ref, data} | _rest], ref), do: {:ok, data}
+
+  defp find_data_response([_response | rest], ref) do
+    find_data_response(rest, ref)
+  end
+
+  # Collect multiple messages
+  defp collect_messages(_conn, _websocket, _ref, acc, 0, _timeout), do: Enum.reverse(acc)
+
+  defp collect_messages(conn, websocket, ref, acc, remaining, timeout) do
+    try do
+      {conn, websocket, received_data} = receive_ws_data(conn, websocket, ref, timeout)
+      {:ok, websocket, frames} = Mint.WebSocket.decode(websocket, received_data)
+
+      text_messages =
+        Enum.filter(frames, fn
+          {:text, _} -> true
+          _ -> false
+        end)
+        |> Enum.map(fn {:text, text} -> text end)
+
+      collect_messages(conn, websocket, ref, text_messages ++ acc, remaining - length(text_messages), timeout)
+    rescue
+      # If timeout, return what we have
+      _ -> Enum.reverse(acc)
+    end
   end
 end

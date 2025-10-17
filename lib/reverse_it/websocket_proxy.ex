@@ -14,7 +14,8 @@ defmodule ReverseIt.WebSocketProxy do
     :conn,
     :websocket,
     :request_ref,
-    :client_headers
+    :client_headers,
+    pending_frames: []
   ]
 
   @type t :: %__MODULE__{
@@ -79,7 +80,8 @@ defmodule ReverseIt.WebSocketProxy do
         # Upgrade to WebSocket
         case Mint.WebSocket.upgrade(:ws, conn, target_path, headers) do
           {:ok, conn, request_ref} ->
-            # Wait for upgrade response
+            # Return immediately with partial state
+            # The upgrade response will be handled in handle_info/2
             state = %__MODULE__{
               config: config,
               conn: conn,
@@ -88,24 +90,16 @@ defmodule ReverseIt.WebSocketProxy do
               client_headers: client_headers
             }
 
-            # We need to receive the upgrade response
-            case wait_for_upgrade(state) do
-              {:ok, state} ->
-                {:ok, state}
-
-              {:error, reason} ->
-                # Known limitation - async init needs refactoring
-                Logger.debug("Failed to upgrade WebSocket connection: #{inspect(reason)}")
-                {:stop, :normal, state}
-            end
+            Logger.debug("WebSocket upgrade initiated, waiting for backend response")
+            {:ok, state}
 
           {:error, reason} ->
-            Logger.debug("Failed to initiate WebSocket upgrade: #{inspect(reason)}")
+            Logger.error("Failed to initiate WebSocket upgrade: #{inspect(reason)}")
             {:stop, :normal, %__MODULE__{config: config, conn: conn}}
         end
 
       {:error, reason} ->
-        Logger.debug("Failed to connect to backend: #{inspect(reason)}")
+        Logger.error("Failed to connect to backend: #{inspect(reason)}")
         {:stop, :normal, %__MODULE__{config: config}}
     end
   end
@@ -123,20 +117,12 @@ defmodule ReverseIt.WebSocketProxy do
         :pong -> {:pong, data}
       end
 
-    case Mint.WebSocket.encode(state.websocket, frame) do
-      {:ok, websocket, data} ->
-        case Mint.WebSocket.stream_request_body(state.conn, state.request_ref, data) do
-          {:ok, conn} ->
-            {:ok, %{state | conn: conn, websocket: websocket}}
-
-          {:error, conn, reason} ->
-            Logger.error("Failed to send frame to backend: #{inspect(reason)}")
-            {:stop, :normal, %{state | conn: conn}}
-        end
-
-      {:error, websocket, reason} ->
-        Logger.error("Failed to encode frame: #{inspect(reason)}")
-        {:stop, :normal, %{state | websocket: websocket}}
+    # If WebSocket isn't ready yet, buffer the frame
+    if state.websocket == nil do
+      Logger.debug("Buffering frame until WebSocket upgrade completes")
+      {:ok, %{state | pending_frames: state.pending_frames ++ [frame]}}
+    else
+      send_frame_to_backend(frame, state)
     end
   end
 
@@ -145,52 +131,66 @@ defmodule ReverseIt.WebSocketProxy do
   """
   @impl WebSock
   def handle_control({data, opcode: :ping}, state) do
-    # Forward ping to backend
-    case Mint.WebSocket.encode(state.websocket, {:ping, data}) do
-      {:ok, websocket, encoded_data} ->
-        case Mint.WebSocket.stream_request_body(state.conn, state.request_ref, encoded_data) do
-          {:ok, conn} ->
-            {:ok, %{state | conn: conn, websocket: websocket}}
+    # If WebSocket isn't ready yet, ignore ping
+    if state.websocket == nil do
+      {:ok, state}
+    else
+      # Forward ping to backend
+      case Mint.WebSocket.encode(state.websocket, {:ping, data}) do
+        {:ok, websocket, encoded_data} ->
+          case Mint.WebSocket.stream_request_body(state.conn, state.request_ref, encoded_data) do
+            {:ok, conn} ->
+              {:ok, %{state | conn: conn, websocket: websocket}}
 
-          {:error, conn, reason} ->
-            Logger.error("Failed to send ping to backend: #{inspect(reason)}")
-            {:stop, :normal, %{state | conn: conn}}
-        end
+            {:error, conn, reason} ->
+              Logger.error("Failed to send ping to backend: #{inspect(reason)}")
+              {:stop, :normal, %{state | conn: conn}}
+          end
 
-      {:error, websocket, reason} ->
-        Logger.error("Failed to encode ping: #{inspect(reason)}")
-        {:stop, :normal, %{state | websocket: websocket}}
+        {:error, websocket, reason} ->
+          Logger.error("Failed to encode ping: #{inspect(reason)}")
+          {:stop, :normal, %{state | websocket: websocket}}
+      end
     end
   end
 
   def handle_control({data, opcode: :pong}, state) do
-    # Forward pong to backend
-    case Mint.WebSocket.encode(state.websocket, {:pong, data}) do
-      {:ok, websocket, encoded_data} ->
-        case Mint.WebSocket.stream_request_body(state.conn, state.request_ref, encoded_data) do
-          {:ok, conn} ->
-            {:ok, %{state | conn: conn, websocket: websocket}}
+    # If WebSocket isn't ready yet, ignore pong
+    if state.websocket == nil do
+      {:ok, state}
+    else
+      # Forward pong to backend
+      case Mint.WebSocket.encode(state.websocket, {:pong, data}) do
+        {:ok, websocket, encoded_data} ->
+          case Mint.WebSocket.stream_request_body(state.conn, state.request_ref, encoded_data) do
+            {:ok, conn} ->
+              {:ok, %{state | conn: conn, websocket: websocket}}
 
-          {:error, conn, reason} ->
-            Logger.error("Failed to send pong to backend: #{inspect(reason)}")
-            {:stop, :normal, %{state | conn: conn}}
-        end
+            {:error, conn, reason} ->
+              Logger.error("Failed to send pong to backend: #{inspect(reason)}")
+              {:stop, :normal, %{state | conn: conn}}
+          end
 
-      {:error, websocket, reason} ->
-        Logger.error("Failed to encode pong: #{inspect(reason)}")
-        {:stop, :normal, %{state | websocket: websocket}}
+        {:error, websocket, reason} ->
+          Logger.error("Failed to encode pong: #{inspect(reason)}")
+          {:stop, :normal, %{state | websocket: websocket}}
+      end
     end
   end
 
   def handle_control({_data, opcode: :close}, state) do
-    # Client wants to close, forward to backend
-    case Mint.WebSocket.encode(state.websocket, :close) do
-      {:ok, websocket, data} ->
-        Mint.WebSocket.stream_request_body(state.conn, state.request_ref, data)
-        {:stop, :normal, %{state | websocket: websocket}}
+    # Client wants to close, forward to backend if ready
+    if state.websocket == nil do
+      {:stop, :normal, state}
+    else
+      case Mint.WebSocket.encode(state.websocket, :close) do
+        {:ok, websocket, data} ->
+          Mint.WebSocket.stream_request_body(state.conn, state.request_ref, data)
+          {:stop, :normal, %{state | websocket: websocket}}
 
-      {:error, _websocket, _reason} ->
-        {:stop, :normal, state}
+        {:error, _websocket, _reason} ->
+          {:stop, :normal, state}
+      end
     end
   end
 
@@ -202,7 +202,13 @@ defmodule ReverseIt.WebSocketProxy do
     case Mint.WebSocket.stream(state.conn, message) do
       {:ok, conn, responses} ->
         state = %{state | conn: conn}
-        process_backend_responses(responses, state)
+
+        # If websocket is nil, we're still waiting for upgrade
+        if state.websocket == nil do
+          process_upgrade_responses(responses, state)
+        else
+          process_backend_responses(responses, state)
+        end
 
       {:error, conn, reason, _responses} ->
         Logger.error("Error streaming from backend: #{inspect(reason)}")
@@ -230,58 +236,60 @@ defmodule ReverseIt.WebSocketProxy do
 
   # Private functions
 
-  defp wait_for_upgrade(state) do
-    receive do
-      message ->
-        case Mint.WebSocket.stream(state.conn, message) do
-          {:ok, conn, responses} ->
-            case process_upgrade_response(responses, %{state | conn: conn}) do
-              {:ok, state} -> {:ok, state}
-              {:continue, state} -> wait_for_upgrade(state)
-              {:error, reason} -> {:error, reason}
-            end
+  defp process_upgrade_responses(responses, state) do
+    # Collect status and headers from responses
+    process_upgrade_responses(responses, state, nil, nil)
+  end
 
-          {:error, _conn, reason, _responses} ->
-            {:error, reason}
+  defp process_upgrade_responses([], state, status, headers) when status != nil and headers != nil do
+    # All responses collected, create WebSocket
+    Logger.debug("Creating WebSocket with status=#{status}")
 
-          :unknown ->
-            wait_for_upgrade(state)
-        end
-    after
-      state.config.timeout ->
-        {:error, :timeout}
+    case Mint.WebSocket.new(state.conn, state.request_ref, status, headers) do
+      {:ok, conn, websocket} ->
+        Logger.debug("WebSocket connection established to backend")
+        state = %{state | conn: conn, websocket: websocket}
+        # Flush any pending frames that arrived before upgrade completed
+        flush_pending_frames(state)
+
+      {:error, conn, reason} ->
+        Logger.error("Failed to create WebSocket: #{inspect(reason)}")
+        {:stop, :normal, %{state | conn: conn}}
     end
   end
 
-  defp process_upgrade_response([], state), do: {:continue, state}
+  defp process_upgrade_responses([], state, _status, _headers) do
+    # Didn't get complete upgrade response yet, wait for more messages
+    {:ok, state}
+  end
 
-  defp process_upgrade_response([response | rest], state) do
+  defp process_upgrade_responses([response | rest], state, status, headers) do
     case response do
-      {:status, ref, status} when ref == state.request_ref ->
-        if status == 101 do
-          process_upgrade_response(rest, state)
+      {:status, ref, new_status} when ref == state.request_ref ->
+        if new_status == 101 do
+          Logger.debug("WebSocket upgrade successful (101)")
+          process_upgrade_responses(rest, state, new_status, headers)
         else
-          {:error, {:unexpected_status, status}}
+          Logger.error("WebSocket upgrade failed with status: #{new_status}")
+          {:stop, :normal, state}
         end
 
-      {:headers, ref, _headers} when ref == state.request_ref ->
-        process_upgrade_response(rest, state)
+      {:headers, ref, new_headers} when ref == state.request_ref ->
+        Logger.debug("Received upgrade headers")
+        process_upgrade_responses(rest, state, status, new_headers)
 
       {:done, ref} when ref == state.request_ref ->
-        # Upgrade complete, create WebSocket
-        case Mint.WebSocket.new(state.conn, state.request_ref, :client, []) do
-          {:ok, conn, websocket} ->
-            {:ok, %{state | conn: conn, websocket: websocket}}
-
-          {:error, _conn, reason} ->
-            {:error, reason}
-        end
+        Logger.debug("Received :done for upgrade")
+        # Continue processing with current status/headers
+        process_upgrade_responses(rest, state, status, headers)
 
       {:error, ref, reason} when ref == state.request_ref ->
-        {:error, reason}
+        Logger.error("WebSocket upgrade error: #{inspect(reason)}")
+        {:stop, :normal, state}
 
-      _other ->
-        process_upgrade_response(rest, state)
+      other ->
+        Logger.debug("Ignoring upgrade response: #{inspect(other)}")
+        process_upgrade_responses(rest, state, status, headers)
     end
   end
 
@@ -322,29 +330,29 @@ defmodule ReverseIt.WebSocketProxy do
     case frame do
       {:text, data} ->
         case forward_frames_to_client(rest, remaining_responses, state) do
-          {:ok, state} -> {:push, {[text: data], []}, state}
-          {:push, {messages, control}, state} -> {:push, {[{:text, data} | messages], control}, state}
+          {:ok, state} -> {:push, [{:text, data}], state}
+          {:push, frames, state} -> {:push, [{:text, data} | frames], state}
           other -> other
         end
 
       {:binary, data} ->
         case forward_frames_to_client(rest, remaining_responses, state) do
-          {:ok, state} -> {:push, {[binary: data], []}, state}
-          {:push, {messages, control}, state} -> {:push, {[{:binary, data} | messages], control}, state}
+          {:ok, state} -> {:push, [{:binary, data}], state}
+          {:push, frames, state} -> {:push, [{:binary, data} | frames], state}
           other -> other
         end
 
       {:ping, data} ->
         case forward_frames_to_client(rest, remaining_responses, state) do
-          {:ok, state} -> {:push, {[], [ping: data]}, state}
-          {:push, {messages, control}, state} -> {:push, {messages, [{:ping, data} | control]}, state}
+          {:ok, state} -> {:push, [{:ping, data}], state}
+          {:push, frames, state} -> {:push, [{:ping, data} | frames], state}
           other -> other
         end
 
       {:pong, data} ->
         case forward_frames_to_client(rest, remaining_responses, state) do
-          {:ok, state} -> {:push, {[], [pong: data]}, state}
-          {:push, {messages, control}, state} -> {:push, {messages, [{:pong, data} | control]}, state}
+          {:ok, state} -> {:push, [{:pong, data}], state}
+          {:push, frames, state} -> {:push, [{:pong, data} | frames], state}
           other -> other
         end
 
@@ -374,5 +382,41 @@ defmodule ReverseIt.WebSocketProxy do
     headers = List.keydelete(headers, "host", 0)
     host = if config.port in [80, 443], do: config.host, else: "#{config.host}:#{config.port}"
     [{"host", host} | headers]
+  end
+
+  defp send_frame_to_backend(frame, state) do
+    case Mint.WebSocket.encode(state.websocket, frame) do
+      {:ok, websocket, data} ->
+        case Mint.WebSocket.stream_request_body(state.conn, state.request_ref, data) do
+          {:ok, conn} ->
+            {:ok, %{state | conn: conn, websocket: websocket}}
+
+          {:error, conn, reason} ->
+            Logger.error("Failed to send frame to backend: #{inspect(reason)}")
+            {:stop, :normal, %{state | conn: conn}}
+        end
+
+      {:error, websocket, reason} ->
+        Logger.error("Failed to encode frame: #{inspect(reason)}")
+        {:stop, :normal, %{state | websocket: websocket}}
+    end
+  end
+
+  defp flush_pending_frames(state) when state.pending_frames == [] do
+    {:ok, state}
+  end
+
+  defp flush_pending_frames(state) do
+    Logger.debug("Flushing #{length(state.pending_frames)} pending frames")
+    flush_frames_recursive(state.pending_frames, %{state | pending_frames: []})
+  end
+
+  defp flush_frames_recursive([], state), do: {:ok, state}
+
+  defp flush_frames_recursive([frame | rest], state) do
+    case send_frame_to_backend(frame, state) do
+      {:ok, state} -> flush_frames_recursive(rest, state)
+      other -> other
+    end
   end
 end
