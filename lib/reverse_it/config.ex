@@ -10,7 +10,13 @@ defmodule ReverseIt.Config do
     :path_prefix,
     :strip_path,
     :timeout,
-    :protocols
+    :connect_timeout,
+    :protocols,
+    :verify_tls,
+    :add_headers,
+    :remove_headers,
+    :max_body_size,
+    :error_response
   ]
 
   @type t :: %__MODULE__{
@@ -20,7 +26,13 @@ defmodule ReverseIt.Config do
           path_prefix: String.t() | nil,
           strip_path: String.t() | nil,
           timeout: non_neg_integer(),
-          protocols: [:http1 | :http2]
+          connect_timeout: non_neg_integer(),
+          protocols: [:http1 | :http2],
+          verify_tls: boolean(),
+          add_headers: [{String.t(), String.t()}],
+          remove_headers: [String.t()],
+          max_body_size: non_neg_integer() | :infinity,
+          error_response: {non_neg_integer(), String.t()}
         }
 
   @doc """
@@ -31,14 +43,20 @@ defmodule ReverseIt.Config do
     * `:backend` - Backend URL (required). Can be http://, https://, ws://, or wss://
     * `:strip_path` - Path prefix to strip from incoming requests before proxying
     * `:timeout` - Request timeout in milliseconds (default: 30_000)
+    * `:connect_timeout` - Connection timeout in milliseconds (default: 5_000)
     * `:protocols` - List of supported protocols (default: [:http1, :http2])
+    * `:verify_tls` - Verify TLS certificates (default: true)
+    * `:add_headers` - List of headers to add to backend requests (default: [])
+    * `:remove_headers` - List of header names to remove from client requests (default: [])
+    * `:max_body_size` - Maximum request/response body size in bytes (default: 10MB, :infinity for unlimited)
+    * `:error_response` - Response to return when backend fails (default: {502, "Bad Gateway"})
 
   ## Examples
 
       iex> ReverseIt.Config.parse(backend: "http://localhost:4000")
       {:ok, %ReverseIt.Config{scheme: :http, host: "localhost", port: 4000, ...}}
 
-      iex> ReverseIt.Config.parse(backend: "https://api.example.com/v1", strip_path: "/api")
+      iex> ReverseIt.Config.parse(backend: "https://api.example.com/v1", strip_path: "/api", verify_tls: false)
       {:ok, %ReverseIt.Config{...}}
   """
   @spec parse(keyword()) :: {:ok, t()} | {:error, String.t()}
@@ -55,7 +73,13 @@ defmodule ReverseIt.Config do
         path_prefix: normalize_path(uri.path),
         strip_path: normalize_path(opts[:strip_path]),
         timeout: opts[:timeout] || 30_000,
-        protocols: opts[:protocols] || [:http1, :http2]
+        connect_timeout: opts[:connect_timeout] || 5_000,
+        protocols: opts[:protocols] || [:http1, :http2],
+        verify_tls: Keyword.get(opts, :verify_tls, true),
+        add_headers: opts[:add_headers] || [],
+        remove_headers: opts[:remove_headers] || [],
+        max_body_size: opts[:max_body_size] || 10_485_760,
+        error_response: opts[:error_response] || {502, "Bad Gateway"}
       }
 
       {:ok, config}
