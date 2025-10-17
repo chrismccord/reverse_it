@@ -197,8 +197,6 @@ test/
 
 ## Implementation Status
 
-### Fully Implemented and Tested
-
 **HTTP Proxying:**
 - HTTP/1.1 and HTTP/2 proxying
 - Request/response streaming
@@ -217,10 +215,5 @@ test/
 - Backend connection via Mint.WebSocket
 - Multiple concurrent connections
 - Large message handling
-- Rapid message streams
 
-**Test Coverage:**
-- 14 passing tests (6 HTTP + 7 WebSocket + 1 doctest)
-- Example clients in Node.js and Python
-- Comprehensive edge case coverage
 
