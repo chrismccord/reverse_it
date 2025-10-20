@@ -1,5 +1,5 @@
 defmodule ReverseIt do
-  @moduledoc """
+  @moduledoc ~s"""
   A full-featured HTTP/1.1, HTTP/2, and WebSocket reverse proxy for Elixir.
 
   Built using Finch (HTTP) and Mint (WebSockets), ReverseIt is designed to work seamlessly within
@@ -138,6 +138,50 @@ defmodule ReverseIt do
         backend: "https://backend:443",
         timeout: 60_000,
         protocols: [:http1, :http2]
+
+  ### Customizing Requests and Responses
+
+  You can wrap ReverseIt in your own Plug to modify request/response headers,
+  add authentication, logging, etc. Use `Plug.Conn.register_before_send/2` to
+  modify responses before they're sent to the client.
+
+      defmodule MyApp.APIProxy do
+        @behaviour Plug
+
+
+        def init(opts), do: opts
+
+        def call(conn, _opts) do
+          # Modify request before proxying
+          conn
+          |> Plug.Conn.put_req_header("x-api-key", "...")
+          # Register callback to modify response after backend responds
+          |> Plug.Conn.register_before_send(fn conn ->
+            conn
+            |> Plug.Conn.put_resp_header("x-proxy-by", "MyApp")
+            |> Plug.Conn.put_resp_header("x-proxy-version", "1.0")
+            |> log_request()
+          end)
+          # Proxy to backend
+          |> ReverseIt.call(
+            ReverseIt.init(
+              name: MyApp.ReverseProxy,
+              backend: "http://backend-api:4000",
+              strip_path: "/api"
+            )
+          )
+        end
+
+        defp log_request(conn) do
+          Logger.info("Proxied \#{conn.method} \#{conn.request_path} → \#{conn.status}")
+          conn
+        end
+      end
+
+      # In your router:
+      scope "/api" do
+        forward "/", MyApp.APIProxy
+      end
   """
 
   @behaviour Plug
