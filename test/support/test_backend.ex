@@ -46,6 +46,29 @@ defmodule ReverseIt.TestBackend do
     |> send_resp(200, response)
   end
 
+  # Large upload endpoint - streams request body and returns size
+  post "/upload" do
+    {total_size, conn} = stream_request_body(conn, 0)
+
+    conn
+    |> put_resp_content_type("application/json")
+    |> send_resp(200, Jason.encode!(%{received_bytes: total_size}))
+  end
+
+  # Large download endpoint - streams response body
+  get "/download/:size" do
+    size = String.to_integer(size)
+    chunk_size = 64_000
+
+    conn =
+      conn
+      |> put_resp_content_type("application/octet-stream")
+      |> send_chunked(200)
+
+    # Stream chunks until we reach desired size
+    stream_response_chunks(conn, size, chunk_size)
+  end
+
   # WebSocket endpoint
   get "/ws" do
     conn
@@ -57,6 +80,43 @@ defmodule ReverseIt.TestBackend do
     conn
     |> put_resp_content_type("text/plain")
     |> send_resp(404, "Not Found")
+  end
+
+  # Helper to stream request body and count bytes
+  defp stream_request_body(conn, total) do
+    case read_body(conn, length: 64_000) do
+      {:more, data, conn} ->
+        stream_request_body(conn, total + byte_size(data))
+
+      {:ok, data, conn} ->
+        {total + byte_size(data), conn}
+
+      {:error, _reason} ->
+        {total, conn}
+    end
+  end
+
+  # Helper to stream response chunks
+  defp stream_response_chunks(conn, remaining, chunk_size) when remaining > 0 do
+    chunk = if remaining >= chunk_size do
+      # Full chunk
+      :binary.copy(<<0>>, chunk_size)
+    else
+      # Final partial chunk
+      :binary.copy(<<0>>, remaining)
+    end
+
+    case chunk(conn, chunk) do
+      {:ok, conn} ->
+        stream_response_chunks(conn, remaining - byte_size(chunk), chunk_size)
+
+      {:error, _reason} ->
+        conn
+    end
+  end
+
+  defp stream_response_chunks(conn, _remaining, _chunk_size) do
+    conn
   end
 end
 

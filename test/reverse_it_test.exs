@@ -57,6 +57,109 @@ defmodule ReverseItTest do
     end
   end
 
+  describe "Streaming Proxy" do
+    @tag :streaming
+    test "streams large request body using Mint fallback" do
+      # Create a large body that exceeds default max_body_size (10MB)
+      # We'll use 15MB to trigger streaming
+      body_size = 15 * 1024 * 1024
+      chunk_size = 1024 * 1024  # 1MB chunks
+      num_chunks = div(body_size, chunk_size)
+
+      # Create a stream of chunks
+      body_stream = Stream.map(1..num_chunks, fn _ -> :binary.copy(<<65>>, chunk_size) end)
+
+      response = Req.post!("#{proxy_url()}/upload",
+        body: body_stream,
+        retry: false,
+        receive_timeout: 60_000
+      )
+
+      assert response.status == 200
+      assert is_map(response.body)
+      assert response.body["received_bytes"] == body_size
+    end
+
+    @tag :streaming
+    test "streams large response body back to client" do
+      # Request 20MB download
+      download_size = 20 * 1024 * 1024
+
+      response = Req.get!("#{proxy_url()}/download/#{download_size}",
+        retry: false,
+        receive_timeout: 60_000
+      )
+
+      assert response.status == 200
+      assert byte_size(response.body) == download_size
+    end
+
+    @tag :streaming
+    test "handles streaming with small body using Finch" do
+      # Small body under max_body_size should use Finch
+      small_body = :binary.copy(<<66>>, 1024)  # 1KB
+
+      response = Req.post!("#{proxy_url()}/upload",
+        body: Stream.take([small_body], 1),
+        retry: false
+      )
+
+      assert response.status == 200
+      assert response.body["received_bytes"] == 1024
+    end
+
+    @tag :streaming
+    test "handles concurrent streaming requests" do
+      # Send multiple large uploads concurrently
+      tasks = for i <- 1..3 do
+        Task.async(fn ->
+          body_size = 12 * 1024 * 1024  # 12MB each
+          chunk_size = 1024 * 1024  # 1MB chunks
+          num_chunks = div(body_size, chunk_size)
+          body_stream = Stream.map(1..num_chunks, fn _ -> :binary.copy(<<i>>, chunk_size) end)
+
+          Req.post!("#{proxy_url()}/upload",
+            body: body_stream,
+            retry: false,
+            receive_timeout: 60_000
+          )
+        end)
+      end
+
+      results = Task.await_many(tasks, 60_000)
+
+      assert Enum.all?(results, fn response ->
+        response.status == 200 && response.body["received_bytes"] == 12 * 1024 * 1024
+      end)
+    end
+
+    @tag :streaming
+    test "streams request and response together" do
+      # Upload 15MB and download 15MB in same request/response cycle
+      upload_size = 15 * 1024 * 1024
+      chunk_size = 1024 * 1024
+      num_chunks = div(upload_size, chunk_size)
+      body_stream = Stream.map(1..num_chunks, fn _ -> :binary.copy(<<67>>, chunk_size) end)
+
+      response = Req.post!("#{proxy_url()}/upload",
+        body: body_stream,
+        retry: false,
+        receive_timeout: 60_000
+      )
+
+      assert response.status == 200
+      assert response.body["received_bytes"] == upload_size
+
+      # Now test download streaming
+      download_response = Req.get!("#{proxy_url()}/download/#{upload_size}",
+        retry: false,
+        receive_timeout: 60_000
+      )
+      assert download_response.status == 200
+      assert byte_size(download_response.body) == upload_size
+    end
+  end
+
   describe "WebSocket Proxy" do
     @tag :websocket
     test "detects WebSocket upgrade request" do
