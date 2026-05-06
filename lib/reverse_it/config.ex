@@ -3,6 +3,13 @@ defmodule ReverseIt.Config do
   Configuration parser and validator for reverse proxy settings.
   """
 
+  @default_max_request_body_size 100 * 1024 * 1024
+  @default_request_body_buffer_size 1 * 1024 * 1024
+  @default_request_body_chunk_size 64 * 1024
+  @default_max_response_header_bytes 64 * 1024
+  @default_max_request_header_bytes 64 * 1024
+  @default_max_websocket_frame_size 16 * 1024 * 1024
+
   defstruct [
     :name,
     :scheme,
@@ -10,13 +17,35 @@ defmodule ReverseIt.Config do
     :port,
     :path_prefix,
     :strip_path,
-    :timeout,
     :connect_timeout,
+    :pool_timeout,
+    :response_header_timeout,
+    :upstream_idle_timeout,
+    :request_body_read_timeout,
     :protocols,
     :verify_tls,
     :add_headers,
     :remove_headers,
-    :max_body_size,
+    :forwarded_headers,
+    :preserve_host_header,
+    :max_request_body_size,
+    :request_body_buffer_size,
+    :request_body_chunk_size,
+    :max_response_body_size,
+    :max_response_header_bytes,
+    :max_request_target_bytes,
+    :max_request_header_line_bytes,
+    :max_request_header_bytes,
+    :max_request_headers,
+    :websocket_idle_timeout,
+    :websocket_backend_upgrade_timeout,
+    :max_websocket_frame_size,
+    :max_websocket_pending_bytes,
+    :max_websocket_pending_frames,
+    :websocket_compress,
+    :websocket_validate_utf8,
+    :websocket_fullsweep_after,
+    :websocket_max_heap_size,
     :error_response
   ]
 
@@ -27,13 +56,35 @@ defmodule ReverseIt.Config do
           port: non_neg_integer(),
           path_prefix: String.t() | nil,
           strip_path: String.t() | nil,
-          timeout: non_neg_integer(),
           connect_timeout: non_neg_integer(),
+          pool_timeout: non_neg_integer(),
+          response_header_timeout: non_neg_integer(),
+          upstream_idle_timeout: non_neg_integer(),
+          request_body_read_timeout: non_neg_integer(),
           protocols: [:http1 | :http2],
           verify_tls: boolean(),
           add_headers: [{String.t(), String.t()}],
-          remove_headers: [String.t()],
-          max_body_size: non_neg_integer() | :infinity,
+          remove_headers: MapSet.t(String.t()),
+          forwarded_headers: :append | :replace | false,
+          preserve_host_header: boolean(),
+          max_request_body_size: non_neg_integer() | :infinity,
+          request_body_buffer_size: pos_integer(),
+          request_body_chunk_size: pos_integer(),
+          max_response_body_size: non_neg_integer() | :infinity,
+          max_response_header_bytes: pos_integer(),
+          max_request_target_bytes: pos_integer(),
+          max_request_header_line_bytes: pos_integer(),
+          max_request_header_bytes: pos_integer(),
+          max_request_headers: pos_integer(),
+          websocket_idle_timeout: non_neg_integer(),
+          websocket_backend_upgrade_timeout: non_neg_integer(),
+          max_websocket_frame_size: pos_integer(),
+          max_websocket_pending_bytes: non_neg_integer(),
+          max_websocket_pending_frames: non_neg_integer(),
+          websocket_compress: boolean(),
+          websocket_validate_utf8: boolean(),
+          websocket_fullsweep_after: non_neg_integer() | nil,
+          websocket_max_heap_size: :erlang.max_heap_size() | nil,
           error_response: {non_neg_integer(), String.t()}
         }
 
@@ -45,13 +96,31 @@ defmodule ReverseIt.Config do
     * `:name` - Name of the Finch pool to use (required)
     * `:backend` - Backend URL (required). Can be http://, https://, ws://, or wss://
     * `:strip_path` - Path prefix to strip from incoming requests before proxying
-    * `:timeout` - Request timeout in milliseconds (default: 30_000)
     * `:connect_timeout` - Connection timeout in milliseconds (default: 5_000)
-    * `:protocols` - List of supported protocols (default: [:http1, :http2])
+    * `:pool_timeout` - Finch pool checkout timeout in milliseconds (default: 5_000)
+    * `:response_header_timeout` - Time to wait for backend response headers (default: 30_000)
+    * `:upstream_idle_timeout` - Rolling idle timeout for backend data (default: 55_000)
+    * `:request_body_read_timeout` - Rolling timeout while reading client request bodies (default: 55_000)
+    * `:protocols` - List of supported upstream HTTP protocols (default: [:http1])
     * `:verify_tls` - Verify TLS certificates (default: true)
     * `:add_headers` - List of headers to add to backend requests (default: [])
     * `:remove_headers` - List of header names to remove from client requests (default: [])
-    * `:max_body_size` - Maximum request/response body size in bytes (default: 10MB, :infinity for unlimited)
+    * `:forwarded_headers` - `:append`, `:replace`, or `false` for X-Forwarded-* behavior (default: :append)
+    * `:preserve_host_header` - Preserve the original Host header instead of the backend host (default: false)
+    * `:max_request_body_size` - Maximum request body size in bytes (default: 100MB, :infinity for unlimited)
+    * `:request_body_buffer_size` - Body size buffered before switching to request streaming (default: 1MB)
+    * `:max_response_body_size` - Maximum response body size in bytes (default: :infinity)
+    * `:max_response_header_bytes` - Maximum backend response header bytes (default: 64KB)
+    * `:max_request_target_bytes` - Maximum request path/query bytes (default: 8KB)
+    * `:max_request_header_line_bytes` - Maximum single request header bytes (default: 8KB)
+    * `:max_request_header_bytes` - Maximum total request header bytes (default: 64KB)
+    * `:max_request_headers` - Maximum number of request headers (default: 100)
+    * `:websocket_idle_timeout` - WebSocket client idle timeout (default: 55_000)
+    * `:websocket_backend_upgrade_timeout` - Backend WebSocket upgrade timeout (default: 5_000)
+    * `:max_websocket_frame_size` - Maximum client/backend WebSocket message size (default: 16MB)
+    * `:max_websocket_pending_bytes` - Maximum frames buffered before backend upgrade (default: 1MB)
+    * `:max_websocket_pending_frames` - Maximum frame count buffered before backend upgrade (default: 16)
+    * `:websocket_compress` - Negotiate client WebSocket compression (default: false)
     * `:error_response` - Response to return when backend fails (default: {502, "Bad Gateway"})
 
   ## Examples
@@ -68,31 +137,10 @@ defmodule ReverseIt.Config do
          {:ok, uri} <- parse_uri(backend),
          {:ok, scheme} <- validate_scheme(uri.scheme),
          {:ok, host} <- validate_host(uri.host),
-         {:ok, port} <- validate_port(uri.port, scheme) do
-      case fetch_name(opts) do
-        {:ok, name} ->
-          config = %__MODULE__{
-            name: name,
-            scheme: scheme,
-            host: host,
-            port: port,
-            path_prefix: normalize_path(uri.path),
-            strip_path: normalize_path(opts[:strip_path]),
-            timeout: opts[:timeout] || 30_000,
-            connect_timeout: opts[:connect_timeout] || 5_000,
-            protocols: opts[:protocols] || [:http1, :http2],
-            verify_tls: Keyword.get(opts, :verify_tls, true),
-            add_headers: opts[:add_headers] || [],
-            remove_headers: opts[:remove_headers] || [],
-            max_body_size: opts[:max_body_size] || 10_485_760,
-            error_response: opts[:error_response] || {502, "Bad Gateway"}
-          }
-
-          {:ok, config}
-
-        error ->
-          error
-      end
+         {:ok, port} <- validate_port(uri.port, scheme),
+         {:ok, name} <- fetch_name(opts),
+         {:ok, config} <- build_config(opts, name, scheme, host, port, uri) do
+      {:ok, config}
     end
   end
 
@@ -103,10 +151,18 @@ defmodule ReverseIt.Config do
   def build_target_path(%__MODULE__{} = config, request_path) do
     # Strip the configured path if needed
     path =
-      if config.strip_path do
-        String.replace_prefix(request_path, config.strip_path, "")
-      else
-        request_path
+      cond do
+        is_nil(config.strip_path) ->
+          request_path
+
+        request_path == config.strip_path ->
+          "/"
+
+        String.starts_with?(request_path, config.strip_path <> "/") ->
+          String.replace_prefix(request_path, config.strip_path, "")
+
+        true ->
+          request_path
       end
 
     # Add backend path prefix if configured
@@ -140,7 +196,88 @@ defmodule ReverseIt.Config do
   def http_scheme(%__MODULE__{scheme: :wss}), do: :https
   def http_scheme(%__MODULE__{scheme: scheme}), do: scheme
 
+  @doc """
+  Returns the WebSocket scheme to use for a backend upgrade.
+  """
+  @spec websocket_scheme(t()) :: :ws | :wss
+  def websocket_scheme(%__MODULE__{scheme: :wss}), do: :wss
+  def websocket_scheme(%__MODULE__{}), do: :ws
+
+  @doc """
+  Returns transport options for direct Mint connections.
+  """
+  @spec transport_opts(t()) :: keyword()
+  def transport_opts(%__MODULE__{} = config) do
+    opts = [timeout: config.connect_timeout]
+
+    if config.scheme in [:https, :wss] and config.verify_tls == false do
+      Keyword.put(opts, :verify, :verify_none)
+    else
+      opts
+    end
+  end
+
   # Private functions
+
+  defp build_config(opts, name, scheme, host, port, uri) do
+    with {:ok, protocols} <- validate_protocols(Keyword.get(opts, :protocols, [:http1])),
+         {:ok, add_headers} <- validate_add_headers(Keyword.get(opts, :add_headers, [])),
+         {:ok, remove_headers} <- validate_remove_headers(Keyword.get(opts, :remove_headers, [])),
+         {:ok, forwarded_headers} <-
+           validate_forwarded_headers(Keyword.get(opts, :forwarded_headers, :append)),
+         {:ok, error_response} <-
+           validate_error_response(Keyword.get(opts, :error_response, {502, "Bad Gateway"})),
+         {:ok, config} <-
+           validate_numeric_options(%__MODULE__{
+             name: name,
+             scheme: scheme,
+             host: host,
+             port: port,
+             path_prefix: normalize_path(uri.path),
+             strip_path: normalize_path(opts[:strip_path]),
+             connect_timeout: Keyword.get(opts, :connect_timeout, 5_000),
+             pool_timeout: Keyword.get(opts, :pool_timeout, 5_000),
+             response_header_timeout: Keyword.get(opts, :response_header_timeout, 30_000),
+             upstream_idle_timeout: Keyword.get(opts, :upstream_idle_timeout, 55_000),
+             request_body_read_timeout: Keyword.get(opts, :request_body_read_timeout, 55_000),
+             protocols: protocols,
+             verify_tls: Keyword.get(opts, :verify_tls, true),
+             add_headers: add_headers,
+             remove_headers: remove_headers,
+             forwarded_headers: forwarded_headers,
+             preserve_host_header: Keyword.get(opts, :preserve_host_header, false),
+             max_request_body_size:
+               Keyword.get(opts, :max_request_body_size, @default_max_request_body_size),
+             request_body_buffer_size:
+               Keyword.get(opts, :request_body_buffer_size, @default_request_body_buffer_size),
+             request_body_chunk_size:
+               Keyword.get(opts, :request_body_chunk_size, @default_request_body_chunk_size),
+             max_response_body_size: Keyword.get(opts, :max_response_body_size, :infinity),
+             max_response_header_bytes:
+               Keyword.get(opts, :max_response_header_bytes, @default_max_response_header_bytes),
+             max_request_target_bytes: Keyword.get(opts, :max_request_target_bytes, 8_192),
+             max_request_header_line_bytes:
+               Keyword.get(opts, :max_request_header_line_bytes, 8_192),
+             max_request_header_bytes:
+               Keyword.get(opts, :max_request_header_bytes, @default_max_request_header_bytes),
+             max_request_headers: Keyword.get(opts, :max_request_headers, 100),
+             websocket_idle_timeout: Keyword.get(opts, :websocket_idle_timeout, 55_000),
+             websocket_backend_upgrade_timeout:
+               Keyword.get(opts, :websocket_backend_upgrade_timeout, 5_000),
+             max_websocket_frame_size:
+               Keyword.get(opts, :max_websocket_frame_size, @default_max_websocket_frame_size),
+             max_websocket_pending_bytes:
+               Keyword.get(opts, :max_websocket_pending_bytes, @default_request_body_buffer_size),
+             max_websocket_pending_frames: Keyword.get(opts, :max_websocket_pending_frames, 16),
+             websocket_compress: Keyword.get(opts, :websocket_compress, false),
+             websocket_validate_utf8: Keyword.get(opts, :websocket_validate_utf8, true),
+             websocket_fullsweep_after: Keyword.get(opts, :websocket_fullsweep_after),
+             websocket_max_heap_size: Keyword.get(opts, :websocket_max_heap_size),
+             error_response: error_response
+           }) do
+      {:ok, config}
+    end
+  end
 
   defp fetch_name(opts) do
     case Keyword.fetch(opts, :name) do
@@ -183,14 +320,136 @@ defmodule ReverseIt.Config do
   defp validate_port(nil, :https), do: {:ok, 443}
   defp validate_port(nil, :ws), do: {:ok, 80}
   defp validate_port(nil, :wss), do: {:ok, 443}
-  defp validate_port(port, _scheme) when is_integer(port), do: {:ok, port}
+  defp validate_port(port, _scheme) when is_integer(port) and port in 1..65_535, do: {:ok, port}
+  defp validate_port(_port, _scheme), do: {:error, "backend port must be between 1 and 65535"}
+
+  defp validate_protocols(protocols) when is_list(protocols) and protocols != [] do
+    if Enum.all?(protocols, &(&1 in [:http1, :http2])) do
+      {:ok, protocols}
+    else
+      {:error, "protocols must be a non-empty list of :http1 or :http2"}
+    end
+  end
+
+  defp validate_protocols(_protocols),
+    do: {:error, "protocols must be a non-empty list of :http1 or :http2"}
+
+  defp validate_add_headers(headers) when is_list(headers) do
+    normalize_config_headers(headers)
+  end
+
+  defp validate_add_headers(_headers),
+    do: {:error, "add_headers must be a list of {name, value} tuples"}
+
+  defp validate_remove_headers(headers) when is_list(headers) do
+    if Enum.all?(headers, &is_binary/1) do
+      {:ok, headers |> Enum.map(&String.downcase/1) |> MapSet.new()}
+    else
+      {:error, "remove_headers must be a list of header names"}
+    end
+  end
+
+  defp validate_remove_headers(_headers),
+    do: {:error, "remove_headers must be a list of header names"}
+
+  defp validate_forwarded_headers(value) when value in [:append, :replace, false],
+    do: {:ok, value}
+
+  defp validate_forwarded_headers(_value) do
+    {:error, "forwarded_headers must be :append, :replace, or false"}
+  end
+
+  defp validate_error_response({status, body})
+       when is_integer(status) and status in 400..599 and is_binary(body) do
+    {:ok, {status, body}}
+  end
+
+  defp validate_error_response(_response) do
+    {:error, "error_response must be a {status, body} tuple with a 4xx/5xx status"}
+  end
+
+  defp normalize_config_headers(headers) do
+    Enum.reduce_while(headers, {:ok, []}, fn
+      {name, value}, {:ok, acc} when is_binary(name) and is_binary(value) ->
+        name = String.downcase(name)
+
+        if valid_header?(name, value) do
+          {:cont, {:ok, [{name, value} | acc]}}
+        else
+          {:halt,
+           {:error, "configured headers cannot contain colon, null, carriage return, or newline"}}
+        end
+
+      _other, {:ok, _acc} ->
+        {:halt, {:error, "add_headers must be a list of {name, value} tuples"}}
+    end)
+    |> case do
+      {:ok, headers} -> {:ok, Enum.reverse(headers)}
+      error -> error
+    end
+  end
+
+  defp validate_numeric_options(config) do
+    checks = [
+      {:connect_timeout, :non_negative_integer},
+      {:pool_timeout, :non_negative_integer},
+      {:response_header_timeout, :non_negative_integer},
+      {:upstream_idle_timeout, :non_negative_integer},
+      {:request_body_read_timeout, :non_negative_integer},
+      {:max_request_body_size, :non_negative_integer_or_infinity},
+      {:request_body_buffer_size, :positive_integer},
+      {:request_body_chunk_size, :positive_integer},
+      {:max_response_body_size, :non_negative_integer_or_infinity},
+      {:max_response_header_bytes, :positive_integer},
+      {:max_request_target_bytes, :positive_integer},
+      {:max_request_header_line_bytes, :positive_integer},
+      {:max_request_header_bytes, :positive_integer},
+      {:max_request_headers, :positive_integer},
+      {:websocket_idle_timeout, :non_negative_integer},
+      {:websocket_backend_upgrade_timeout, :non_negative_integer},
+      {:max_websocket_frame_size, :positive_integer},
+      {:max_websocket_pending_bytes, :non_negative_integer},
+      {:max_websocket_pending_frames, :non_negative_integer}
+    ]
+
+    Enum.reduce_while(checks, {:ok, config}, fn {field, type}, {:ok, config} ->
+      value = Map.fetch!(config, field)
+
+      if valid_number?(value, type) do
+        {:cont, {:ok, config}}
+      else
+        {:halt, {:error, "#{field} must be #{describe_number_type(type)}"}}
+      end
+    end)
+  end
+
+  defp valid_number?(value, :positive_integer), do: is_integer(value) and value > 0
+  defp valid_number?(value, :non_negative_integer), do: is_integer(value) and value >= 0
+  defp valid_number?(:infinity, :non_negative_integer_or_infinity), do: true
+
+  defp valid_number?(value, :non_negative_integer_or_infinity),
+    do: valid_number?(value, :non_negative_integer)
+
+  defp describe_number_type(:positive_integer), do: "a positive integer"
+  defp describe_number_type(:non_negative_integer), do: "a non-negative integer"
+
+  defp describe_number_type(:non_negative_integer_or_infinity),
+    do: "a non-negative integer or :infinity"
+
+  defp valid_header?(name, value) do
+    :binary.match(name, [":", "\n", "\r", "\x00"]) == :nomatch and
+      :binary.match(value, ["\n", "\r", "\x00"]) == :nomatch
+  end
 
   defp normalize_path(nil), do: nil
   defp normalize_path(""), do: nil
 
   defp normalize_path(path) do
-    path
-    |> String.trim()
-    |> String.trim_trailing("/")
+    path =
+      path
+      |> String.trim()
+      |> String.trim_trailing("/")
+
+    if path == "", do: nil, else: path
   end
 end

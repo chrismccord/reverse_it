@@ -98,13 +98,14 @@ defmodule ReverseIt.TestBackend do
 
   # Helper to stream response chunks
   defp stream_response_chunks(conn, remaining, chunk_size) when remaining > 0 do
-    chunk = if remaining >= chunk_size do
-      # Full chunk
-      :binary.copy(<<0>>, chunk_size)
-    else
-      # Final partial chunk
-      :binary.copy(<<0>>, remaining)
-    end
+    chunk =
+      if remaining >= chunk_size do
+        # Full chunk
+        :binary.copy(<<0>>, chunk_size)
+      else
+        # Final partial chunk
+        :binary.copy(<<0>>, remaining)
+      end
 
     case chunk(conn, chunk) do
       {:ok, conn} ->

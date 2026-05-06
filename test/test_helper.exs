@@ -56,14 +56,22 @@ IO.puts("Proxy port: #{proxy_port}")
 {:ok, _backend_pid} =
   Supervisor.start_child(
     ReverseIt.Supervisor,
-    {Bandit, plug: ReverseIt.TestBackend, scheme: :http, port: backend_port}
+    {Bandit,
+     plug: ReverseIt.TestBackend,
+     scheme: :http,
+     port: backend_port,
+     thousand_island_options: [silent_terminate_on_error: true]}
   )
 
 # Start proxy server on dynamically allocated port
 {:ok, _proxy_pid} =
   Supervisor.start_child(
     ReverseIt.Supervisor,
-    {Bandit, plug: ReverseIt.TestProxy, scheme: :http, port: proxy_port}
+    {Bandit,
+     plug: ReverseIt.TestProxy,
+     scheme: :http,
+     port: proxy_port,
+     thousand_island_options: [silent_terminate_on_error: true]}
   )
 
 # Wait for both servers to be ready

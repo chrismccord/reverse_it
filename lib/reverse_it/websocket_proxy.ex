@@ -5,7 +5,7 @@ defmodule ReverseIt.WebSocketProxy do
   """
 
   require Logger
-  alias ReverseIt.Config
+  alias ReverseIt.{Config, Headers}
 
   @behaviour WebSock
 
@@ -14,8 +14,10 @@ defmodule ReverseIt.WebSocketProxy do
     :conn,
     :websocket,
     :request_ref,
-    :client_headers,
-    pending_frames: []
+    :client,
+    :backend_upgrade_timer,
+    pending_frames: [],
+    pending_bytes: 0
   ]
 
   @type t :: %__MODULE__{
@@ -23,25 +25,11 @@ defmodule ReverseIt.WebSocketProxy do
           conn: Mint.HTTP.t(),
           websocket: Mint.WebSocket.t(),
           request_ref: Mint.Types.request_ref(),
-          client_headers: [{String.t(), String.t()}]
+          client: map(),
+          backend_upgrade_timer: reference() | nil,
+          pending_frames: [Mint.WebSocket.frame()],
+          pending_bytes: non_neg_integer()
         }
-
-  # Hop-by-hop headers that should not be forwarded
-  @hop_by_hop_headers [
-    "connection",
-    "keep-alive",
-    "proxy-authenticate",
-    "proxy-authorization",
-    "te",
-    "trailer",
-    "transfer-encoding",
-    "upgrade",
-    "sec-websocket-accept",
-    "sec-websocket-extensions",
-    "sec-websocket-key",
-    "sec-websocket-protocol",
-    "sec-websocket-version"
-  ]
 
   @doc """
   Initializes the WebSocket proxy connection.
@@ -53,14 +41,14 @@ defmodule ReverseIt.WebSocketProxy do
   @impl WebSock
   def init(opts) do
     config = Keyword.fetch!(opts, :config)
-    client_headers = Keyword.get(opts, :client_headers, [])
+    client = Keyword.fetch!(opts, :client)
 
     # Connect to backend
     scheme = Config.http_scheme(config)
 
     case Mint.HTTP.connect(scheme, config.host, config.port,
            protocols: [:http1],
-           transport_opts: [timeout: config.timeout]
+           transport_opts: Config.transport_opts(config)
          ) do
       {:ok, conn} ->
         # Build target path
@@ -75,11 +63,18 @@ defmodule ReverseIt.WebSocketProxy do
           end
 
         # Prepare headers for WebSocket upgrade
-        headers = prepare_headers(client_headers, config)
+        headers = Headers.websocket_request_headers(client, config)
 
         # Upgrade to WebSocket
-        case Mint.WebSocket.upgrade(:ws, conn, target_path, headers) do
+        case Mint.WebSocket.upgrade(Config.websocket_scheme(config), conn, target_path, headers) do
           {:ok, conn, request_ref} ->
+            timer =
+              Process.send_after(
+                self(),
+                :reverse_it_backend_websocket_upgrade_timeout,
+                config.websocket_backend_upgrade_timeout
+              )
+
             # Return immediately with partial state
             # The upgrade response will be handled in handle_info/2
             state = %__MODULE__{
@@ -87,7 +82,8 @@ defmodule ReverseIt.WebSocketProxy do
               conn: conn,
               websocket: nil,
               request_ref: request_ref,
-              client_headers: client_headers
+              client: client,
+              backend_upgrade_timer: timer
             }
 
             Logger.debug("WebSocket upgrade initiated, waiting for backend response")
@@ -117,12 +113,15 @@ defmodule ReverseIt.WebSocketProxy do
         :pong -> {:pong, data}
       end
 
-    # If WebSocket isn't ready yet, buffer the frame
-    if state.websocket == nil do
-      Logger.debug("Buffering frame until WebSocket upgrade completes")
-      {:ok, %{state | pending_frames: state.pending_frames ++ [frame]}}
-    else
-      send_frame_to_backend(frame, state)
+    cond do
+      byte_size(data) > state.config.max_websocket_frame_size ->
+        {:stop, :message_too_large, {1009, "message too large"}, state}
+
+      state.websocket == nil ->
+        buffer_pending_frame(frame, data, state)
+
+      true ->
+        send_frame_to_backend(frame, state)
     end
   end
 
@@ -198,6 +197,15 @@ defmodule ReverseIt.WebSocketProxy do
   Handles messages from the backend connection.
   """
   @impl WebSock
+  def handle_info(:reverse_it_backend_websocket_upgrade_timeout, %{websocket: nil} = state) do
+    Logger.error("Backend WebSocket upgrade timed out")
+    {:stop, :backend_upgrade_timeout, {1011, "backend upgrade timeout"}, state}
+  end
+
+  def handle_info(:reverse_it_backend_websocket_upgrade_timeout, state) do
+    {:ok, state}
+  end
+
   def handle_info(message, state) do
     case Mint.WebSocket.stream(state.conn, message) do
       {:ok, conn, responses} ->
@@ -249,7 +257,8 @@ defmodule ReverseIt.WebSocketProxy do
     case Mint.WebSocket.new(state.conn, state.request_ref, status, headers) do
       {:ok, conn, websocket} ->
         Logger.debug("WebSocket connection established to backend")
-        state = %{state | conn: conn, websocket: websocket}
+        cancel_backend_upgrade_timer(state)
+        state = %{state | conn: conn, websocket: websocket, backend_upgrade_timer: nil}
         # Flush any pending frames that arrived before upgrade completed
         flush_pending_frames(state)
 
@@ -303,7 +312,12 @@ defmodule ReverseIt.WebSocketProxy do
         case Mint.WebSocket.decode(state.websocket, data) do
           {:ok, websocket, frames} ->
             state = %{state | websocket: websocket}
-            forward_frames_to_client(frames, rest, state)
+
+            if backend_websocket_size_ok?(frames, websocket, state.config) do
+              forward_frames_to_client(frames, rest, state)
+            else
+              {:stop, :backend_message_too_large, {1009, "message too large"}, state}
+            end
 
           {:error, websocket, reason} ->
             Logger.error("Failed to decode backend frame: #{inspect(reason)}")
@@ -365,26 +379,6 @@ defmodule ReverseIt.WebSocketProxy do
     end
   end
 
-  defp prepare_headers(client_headers, config) do
-    client_headers
-    |> filter_hop_by_hop_headers()
-    |> replace_host_header(config)
-    |> Enum.map(fn {k, v} -> {String.downcase(k), v} end)
-  end
-
-  defp filter_hop_by_hop_headers(headers) do
-    Enum.reject(headers, fn {name, _value} ->
-      String.downcase(name) in @hop_by_hop_headers
-    end)
-  end
-
-  defp replace_host_header(headers, config) do
-    # Remove existing host header and add backend host
-    headers = List.keydelete(headers, "host", 0)
-    host = if config.port in [80, 443], do: config.host, else: "#{config.host}:#{config.port}"
-    [{"host", host} | headers]
-  end
-
   defp send_frame_to_backend(frame, state) do
     case Mint.WebSocket.encode(state.websocket, frame) do
       {:ok, websocket, data} ->
@@ -409,7 +403,7 @@ defmodule ReverseIt.WebSocketProxy do
 
   defp flush_pending_frames(state) do
     Logger.debug("Flushing #{length(state.pending_frames)} pending frames")
-    flush_frames_recursive(state.pending_frames, %{state | pending_frames: []})
+    flush_frames_recursive(state.pending_frames, %{state | pending_frames: [], pending_bytes: 0})
   end
 
   defp flush_frames_recursive([], state), do: {:ok, state}
@@ -420,4 +414,57 @@ defmodule ReverseIt.WebSocketProxy do
       other -> other
     end
   end
+
+  defp buffer_pending_frame(frame, data, state) do
+    pending_frames = length(state.pending_frames) + 1
+    pending_bytes = state.pending_bytes + byte_size(data)
+
+    if pending_frames > state.config.max_websocket_pending_frames or
+         pending_bytes > state.config.max_websocket_pending_bytes do
+      {:stop, :pending_message_limit, {1009, "message too large"}, state}
+    else
+      Logger.debug("Buffering frame until WebSocket upgrade completes")
+
+      {:ok,
+       %{state | pending_frames: state.pending_frames ++ [frame], pending_bytes: pending_bytes}}
+    end
+  end
+
+  defp cancel_backend_upgrade_timer(%{backend_upgrade_timer: nil}), do: :ok
+
+  defp cancel_backend_upgrade_timer(%{backend_upgrade_timer: timer}) do
+    Process.cancel_timer(timer)
+    :ok
+  end
+
+  defp backend_websocket_size_ok?(frames, websocket, config) do
+    Enum.all?(frames, fn
+      {:text, data} -> byte_size(data) <= config.max_websocket_frame_size
+      {:binary, data} -> byte_size(data) <= config.max_websocket_frame_size
+      {:ping, data} -> byte_size(data) <= 125
+      {:pong, data} -> byte_size(data) <= 125
+      {:close, _code, reason} when is_binary(reason) -> byte_size(reason) <= 123
+      {:close, _code, _reason} -> true
+      :close -> true
+      {:error, _reason} -> false
+    end) and websocket_buffer_bytes(websocket) <= config.max_websocket_frame_size
+  end
+
+  defp websocket_buffer_bytes(%{buffer: buffer, fragment: fragment}) do
+    byte_size(buffer) + websocket_fragment_bytes(fragment)
+  end
+
+  defp websocket_buffer_bytes(_websocket), do: 0
+
+  defp websocket_fragment_bytes(nil), do: 0
+
+  defp websocket_fragment_bytes(frame) when is_tuple(frame) and tuple_size(frame) >= 4 do
+    case elem(frame, 3) do
+      data when is_binary(data) -> byte_size(data)
+      data when is_list(data) -> IO.iodata_length(data)
+      _other -> 0
+    end
+  end
+
+  defp websocket_fragment_bytes(_frame), do: 0
 end

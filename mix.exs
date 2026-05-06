@@ -1,13 +1,21 @@
 defmodule ReverseIt.MixProject do
   use Mix.Project
 
+  @version "0.2.0"
+  @source_url "https://github.com/chrismccord/reverse_it"
+
   def project do
     [
       app: :reverse_it,
-      version: "0.1.0",
+      version: @version,
       elixir: "~> 1.18",
       elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,
+      description: description(),
+      package: package(),
+      name: "ReverseIt",
+      source_url: @source_url,
+      homepage_url: @source_url,
       deps: deps()
     ]
   end
@@ -33,9 +41,24 @@ defmodule ReverseIt.MixProject do
       {:websock, "~> 0.5"},
       {:websock_adapter, "~> 0.5"},
       {:castore, "~> 1.0"},
+      {:ex_doc, "~> 0.40", only: :dev, runtime: false},
       {:bandit, "~> 1.5", only: [:dev, :test]},
       {:jason, "~> 1.4", only: [:dev, :test]},
       {:req, "~> 0.4", only: [:test]}
+    ]
+  end
+
+  defp description do
+    "A full-featured reverse proxy for Phoenix and Plug applications with HTTP and WebSocket support."
+  end
+
+  defp package do
+    [
+      licenses: ["MIT"],
+      links: %{
+        "Changelog" => "#{@source_url}/blob/main/CHANGELOG.md",
+        "GitHub" => @source_url
+      }
     ]
   end
 end

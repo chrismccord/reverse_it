@@ -8,6 +8,23 @@ defmodule ReverseItTest do
   defp proxy_port, do: Application.get_env(:reverse_it, :test_proxy_port)
   defp backend_port, do: Application.get_env(:reverse_it, :test_backend_port)
 
+  describe "Configuration" do
+    test "uses hardened router-style defaults" do
+      {:ok, config} =
+        ReverseIt.Config.parse(
+          name: ReverseIt.TestFinch,
+          backend: "http://localhost:#{backend_port()}"
+        )
+
+      assert config.max_request_body_size == 100 * 1024 * 1024
+      assert config.request_body_buffer_size == 1024 * 1024
+      assert config.response_header_timeout == 30_000
+      assert config.upstream_idle_timeout == 55_000
+      assert config.max_websocket_frame_size == 16 * 1024 * 1024
+      assert config.forwarded_headers == :append
+    end
+  end
+
   describe "HTTP Proxy" do
     test "proxies simple GET request" do
       response = Req.get!("#{proxy_url()}/hello")
@@ -45,6 +62,54 @@ defmodule ReverseItTest do
       assert Map.has_key?(headers, "x-forwarded-host")
     end
 
+    test "strips hop-by-hop and Connection-nominated request headers" do
+      response =
+        Req.get!("#{proxy_url()}/headers",
+          headers: [
+            {"connection", "x-secret"},
+            {"x-secret", "should-not-forward"}
+          ]
+        )
+
+      assert response.status == 200
+      headers = response.body["headers"]
+      refute Map.has_key?(headers, "connection")
+      refute Map.has_key?(headers, "x-secret")
+    end
+
+    test "can replace untrusted forwarded headers" do
+      response =
+        Req.get!("#{proxy_url()}/replace-forwarded/headers",
+          headers: [{"x-forwarded-for", "1.1.1.1"}]
+        )
+
+      assert response.status == 200
+      headers = response.body["headers"]
+      assert headers["x-forwarded-for"]
+      refute String.contains?(headers["x-forwarded-for"], "1.1.1.1")
+    end
+
+    test "rejects request bodies over the configured maximum" do
+      response =
+        Req.post!("#{proxy_url()}/limited/upload",
+          body: :binary.copy("A", 2048),
+          retry: false
+        )
+
+      assert response.status == 413
+    end
+
+    test "rejects responses over the configured maximum before forwarding body data" do
+      response =
+        Req.get!("#{proxy_url()}/response-limit/download/2048",
+          retry: false,
+          receive_timeout: 60_000
+        )
+
+      assert response.status == 502
+      assert response.body == "Bad Gateway: Response too large"
+    end
+
     test "handles 404 from backend" do
       response = Req.get!("#{proxy_url()}/nonexistent", retry: false)
       assert response.status == 404
@@ -60,20 +125,22 @@ defmodule ReverseItTest do
   describe "Streaming Proxy" do
     @tag :streaming
     test "streams large request body using Mint fallback" do
-      # Create a large body that exceeds default max_body_size (10MB)
-      # We'll use 15MB to trigger streaming
+      # Create a body that exceeds the default in-memory buffer threshold.
+      # We'll use 15MB to trigger request streaming.
       body_size = 15 * 1024 * 1024
-      chunk_size = 1024 * 1024  # 1MB chunks
+      # 1MB chunks
+      chunk_size = 1024 * 1024
       num_chunks = div(body_size, chunk_size)
 
       # Create a stream of chunks
       body_stream = Stream.map(1..num_chunks, fn _ -> :binary.copy(<<65>>, chunk_size) end)
 
-      response = Req.post!("#{proxy_url()}/upload",
-        body: body_stream,
-        retry: false,
-        receive_timeout: 60_000
-      )
+      response =
+        Req.post!("#{proxy_url()}/upload",
+          body: body_stream,
+          retry: false,
+          receive_timeout: 60_000
+        )
 
       assert response.status == 200
       assert is_map(response.body)
@@ -85,10 +152,11 @@ defmodule ReverseItTest do
       # Request 20MB download
       download_size = 20 * 1024 * 1024
 
-      response = Req.get!("#{proxy_url()}/download/#{download_size}",
-        retry: false,
-        receive_timeout: 60_000
-      )
+      response =
+        Req.get!("#{proxy_url()}/download/#{download_size}",
+          retry: false,
+          receive_timeout: 60_000
+        )
 
       assert response.status == 200
       assert byte_size(response.body) == download_size
@@ -96,13 +164,15 @@ defmodule ReverseItTest do
 
     @tag :streaming
     test "handles streaming with small body using Finch" do
-      # Small body under max_body_size should use Finch
-      small_body = :binary.copy(<<66>>, 1024)  # 1KB
+      # Small body under the buffer threshold should use Finch.
+      # 1KB
+      small_body = :binary.copy(<<66>>, 1024)
 
-      response = Req.post!("#{proxy_url()}/upload",
-        body: Stream.take([small_body], 1),
-        retry: false
-      )
+      response =
+        Req.post!("#{proxy_url()}/upload",
+          body: Stream.take([small_body], 1),
+          retry: false
+        )
 
       assert response.status == 200
       assert response.body["received_bytes"] == 1024
@@ -111,26 +181,29 @@ defmodule ReverseItTest do
     @tag :streaming
     test "handles concurrent streaming requests" do
       # Send multiple large uploads concurrently
-      tasks = for i <- 1..3 do
-        Task.async(fn ->
-          body_size = 12 * 1024 * 1024  # 12MB each
-          chunk_size = 1024 * 1024  # 1MB chunks
-          num_chunks = div(body_size, chunk_size)
-          body_stream = Stream.map(1..num_chunks, fn _ -> :binary.copy(<<i>>, chunk_size) end)
+      tasks =
+        for i <- 1..3 do
+          Task.async(fn ->
+            # 12MB each
+            body_size = 12 * 1024 * 1024
+            # 1MB chunks
+            chunk_size = 1024 * 1024
+            num_chunks = div(body_size, chunk_size)
+            body_stream = Stream.map(1..num_chunks, fn _ -> :binary.copy(<<i>>, chunk_size) end)
 
-          Req.post!("#{proxy_url()}/upload",
-            body: body_stream,
-            retry: false,
-            receive_timeout: 60_000
-          )
-        end)
-      end
+            Req.post!("#{proxy_url()}/upload",
+              body: body_stream,
+              retry: false,
+              receive_timeout: 60_000
+            )
+          end)
+        end
 
       results = Task.await_many(tasks, 60_000)
 
       assert Enum.all?(results, fn response ->
-        response.status == 200 && response.body["received_bytes"] == 12 * 1024 * 1024
-      end)
+               response.status == 200 && response.body["received_bytes"] == 12 * 1024 * 1024
+             end)
     end
 
     @tag :streaming
@@ -141,20 +214,23 @@ defmodule ReverseItTest do
       num_chunks = div(upload_size, chunk_size)
       body_stream = Stream.map(1..num_chunks, fn _ -> :binary.copy(<<67>>, chunk_size) end)
 
-      response = Req.post!("#{proxy_url()}/upload",
-        body: body_stream,
-        retry: false,
-        receive_timeout: 60_000
-      )
+      response =
+        Req.post!("#{proxy_url()}/upload",
+          body: body_stream,
+          retry: false,
+          receive_timeout: 60_000
+        )
 
       assert response.status == 200
       assert response.body["received_bytes"] == upload_size
 
       # Now test download streaming
-      download_response = Req.get!("#{proxy_url()}/download/#{upload_size}",
-        retry: false,
-        receive_timeout: 60_000
-      )
+      download_response =
+        Req.get!("#{proxy_url()}/download/#{upload_size}",
+          retry: false,
+          receive_timeout: 60_000
+        )
+
       assert download_response.status == 200
       assert byte_size(download_response.body) == upload_size
     end
@@ -411,6 +487,37 @@ defmodule ReverseItTest do
         )
 
       assert text == "Backend echo: "
+
+      Mint.HTTP.close(conn)
+    end
+
+    @tag :websocket
+    test "closes WebSocket connections with frames over the configured maximum" do
+      {:ok, conn} = Mint.HTTP.connect(:http, "localhost", proxy_port())
+      {:ok, conn, ref} = Mint.WebSocket.upgrade(:ws, conn, "/tiny-ws/ws", [])
+      {:ok, conn, websocket} = wait_for_ws_upgrade(conn, ref, 5000)
+
+      {:ok, _websocket, data} =
+        Mint.WebSocket.encode(websocket, {:text, String.duplicate("A", 256)})
+
+      {:ok, conn} = Mint.WebSocket.stream_request_body(conn, ref, data)
+
+      assert_receive message, 2000
+
+      case Mint.WebSocket.stream(conn, message) do
+        {:ok, _conn, responses} ->
+          assert Enum.any?(responses, fn
+                   {:data, ^ref, _data} -> true
+                   {:done, ^ref} -> true
+                   _other -> false
+                 end)
+
+        {:error, _conn, _reason, _responses} ->
+          assert true
+
+        :unknown ->
+          assert match?({:tcp_closed, _socket}, message)
+      end
 
       Mint.HTTP.close(conn)
     end

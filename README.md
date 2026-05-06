@@ -1,16 +1,16 @@
 # ReverseIt - Elixir HTTP/WebSocket Reverse Proxy
 
-A full-featured HTTP/1.1, HTTP/2, and WebSocket reverse proxy for Elixir, built using Finch (HTTP) and Mint (WebSockets). Designed to work seamlessly within Phoenix/Plug pipelines.
+A full-featured HTTP/1.1, optional HTTP/2, and WebSocket reverse proxy for Elixir, built using Finch (HTTP) and Mint (WebSockets). Designed to work seamlessly within Phoenix/Plug pipelines.
 
 ## Features
 
-- **Full HTTP Support**: HTTP/1.1 and HTTP/2 proxying with streaming request/response bodies
+- **Full HTTP Support**: HTTP/1.1 proxying by default, optional HTTP/2 upstreams, and streaming request/response bodies
 - **Connection Pooling**: Automatic connection pooling via Finch (50 connections per backend)
-- **HTTP/2 Multiplexing**: Leverages HTTP/2 multiplexing for efficient request handling
+- **HTTP/2 Support**: Opt-in upstream HTTP/2 support with `protocols: [:http1, :http2]`
 - **WebSocket Proxying**: Bidirectional WebSocket frame forwarding with full protocol support
 - **Plug Integration**: Works as a standard Plug module in any Phoenix or Plug application
 - **Header Management**: Automatic X-Forwarded-* header injection and hop-by-hop header filtering
-- **Request Body Limits**: Configurable limits to prevent memory exhaustion (default: 10MB)
+- **DoS Protection**: Configurable request/response, header, timeout, and WebSocket limits with router-style defaults
 - **Path Manipulation**: Strip path prefixes and add backend path prefixes
 - **Protocol Detection**: Automatic detection and routing for HTTP vs WebSocket upgrades
 
@@ -74,7 +74,7 @@ defmodule MyApp.ProxyPlug do
   forward "/", ReverseIt,
     name: MyApp.ReverseProxy,
     backend: "http://localhost:4001",
-    timeout: 60_000,
+    upstream_idle_timeout: 60_000,
     protocols: [:http1, :http2]
 end
 ```
@@ -133,24 +133,60 @@ end
 - `:name` (required) - Name for the Finch connection pool
 - `:pool_size` - Max connections per backend (default: 50)
 - `:pool_count` - Number of connection pools (default: 1)
-- `:pool_timeout` - Connection timeout in ms (default: 30,000)
+- `:connect_timeout` - Backend connection timeout in ms (default: 5,000)
+- `:conn_max_idle_time` - Idle timeout for pooled backend HTTP/1 connections (default: 90,000)
+- `:protocols` - Upstream protocols for pooled Finch requests (default: `[:http1]`)
 
 ### Plug Options (when using as a Plug)
 
 - `:name` (required) - Name of the Finch pool to use
 - `:backend` (required) - Backend URL (http://, https://, ws://, or wss://)
 - `:strip_path` - Path prefix to strip from incoming requests
-- `:timeout` - Request timeout in milliseconds (default: 30,000)
-- `:max_body_size` - Maximum request body size in bytes (default: 10,485,760 / 10MB, `:infinity` for unlimited)
-- `:protocols` - List of supported protocols (default: [:http1, :http2])
+- `:connect_timeout` - Backend connection timeout in milliseconds (default: 5,000)
+- `:pool_timeout` - Finch pool checkout timeout in milliseconds (default: 5,000)
+- `:response_header_timeout` - Time to wait for backend response headers in streaming paths (default: 30,000)
+- `:upstream_idle_timeout` - Rolling idle timeout while receiving backend data (default: 55,000)
+- `:request_body_read_timeout` - Rolling timeout while reading client request bodies (default: 55,000)
+- `:max_request_body_size` - Maximum request body size in bytes (default: 104,857,600 / 100MB, `:infinity` for unlimited)
+- `:request_body_buffer_size` - Body bytes buffered before switching to request streaming (default: 1,048,576 / 1MB)
+- `:max_response_body_size` - Maximum response body size in bytes (default: `:infinity`)
+- `:max_request_target_bytes` - Maximum request path/query bytes (default: 8,192)
+- `:max_request_header_line_bytes` - Maximum single request header bytes (default: 8,192)
+- `:max_request_header_bytes` - Maximum total request header bytes (default: 65,536)
+- `:max_request_headers` - Maximum request header count (default: 100)
+- `:max_response_header_bytes` - Maximum backend response header bytes (default: 65,536)
+- `:forwarded_headers` - `:append`, `:replace`, or `false` for X-Forwarded-* behavior (default: `:append`)
+- `:add_headers` / `:remove_headers` - Backend request header policy
+- `:verify_tls` - Verify backend TLS certificates (default: `true`)
+- `:protocols` - List of supported upstream protocols (default: `[:http1]`)
+- `:websocket_idle_timeout` - WebSocket idle timeout in milliseconds (default: 55,000)
+- `:websocket_backend_upgrade_timeout` - Backend WebSocket upgrade timeout (default: 5,000)
+- `:max_websocket_frame_size` - Maximum WebSocket frame/message size (default: 16,777,216 / 16MB)
+- `:max_websocket_pending_bytes` - Maximum bytes buffered before backend upgrade completes (default: 1,048,576 / 1MB)
+- `:max_websocket_pending_frames` - Maximum frame count buffered before backend upgrade completes (default: 16)
+- `:websocket_compress` - Negotiate client WebSocket compression (default: `false`)
+
+### Router-Style Defaults
+
+ReverseIt’s defaults are intentionally broad enough for general HTTP routers while still bounding common DoS vectors:
+
+- 30s backend response-header timeout for streaming paths
+- 55s rolling backend/client body idle timeouts
+- 90s pooled backend HTTP/1 keepalive idle timeout
+- 8KB request target and per-header line limits
+- 64KB aggregate request/response header limits
+- 100MB maximum request body with a 1MB in-memory request buffer threshold
+- 16MB WebSocket frame/message limit and bounded pre-upgrade frame buffering
+
+If ReverseIt runs behind a trusted edge proxy, set `forwarded_headers: :replace` at the edge-facing ReverseIt instance. Use `:append` only when downstream applications treat X-Forwarded-* as informational rather than trusted identity.
 
 ## Testing
 
 The project includes comprehensive test coverage with test servers that start automatically during test runs:
 
 ```bash
-# Run all tests (14 tests: 6 HTTP + 7 WebSocket + 1 doctest)
-# Test servers start automatically on ports 4000 (proxy) and 4001 (backend)
+# Run all tests
+# Test servers start automatically on available local ports
 mix test
 
 # Run only WebSocket tests
@@ -199,7 +235,7 @@ See [examples/README.md](examples/README.md) for detailed usage.
 ```
 Client → Phoenix/Bandit → ReverseIt (Plug) → Finch (connection pool) → Backend
                                               ↑
-                                     50 pooled HTTP/1.1 or HTTP/2 connections
+                                     50 pooled HTTP/1.1 connections by default
 ```
 
 ### WebSocket Proxy Flow
@@ -213,7 +249,7 @@ ReverseIt uses [Finch](https://hexdocs.pm/finch) for HTTP requests, providing:
 
 - **Automatic pooling**: 50 connections per backend by default
 - **Connection reuse**: HTTP connections are reused across requests
-- **HTTP/2 multiplexing**: Multiple requests can share a single HTTP/2 connection
+- **HTTP/2 support**: Upstream HTTP/2 can be enabled with `protocols: [:http1, :http2]`
 - **Performance**: Eliminates TCP/TLS handshake overhead
 - **Production-ready**: Battle-tested in production Elixir applications
 
@@ -245,9 +281,10 @@ test/
 ## Implementation Status
 
 **HTTP Proxying:**
-- HTTP/1.1 and HTTP/2 proxying
-- Request/response streaming
-- Header forwarding and filtering
+- HTTP/1.1 proxying by default; HTTP/2 upstream support is opt-in with `protocols: [:http1, :http2]`
+- Request body streaming above the configured buffer threshold
+- Response streaming through Finch/Mint without buffering complete responses
+- Header forwarding, validation, and RFC hop-by-hop filtering
 - X-Forwarded-* headers
 - Connection pooling
 - Path manipulation (strip_path, path_prefix)
@@ -259,8 +296,7 @@ test/
 - WebSocket proxy handler (WebSock behavior)
 - Bidirectional frame forwarding (text, binary, ping, pong, close)
 - Async initialization with frame buffering
+- Bounded frame sizes, pending buffers, and idle/upgrade timeouts
 - Backend connection via Mint.WebSocket
 - Multiple concurrent connections
 - Large message handling
-
-
