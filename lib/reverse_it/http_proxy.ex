@@ -317,10 +317,10 @@ defmodule ReverseIt.HTTPProxy do
       {:ok, mint_conn, ref} ->
         with :ok <- ensure_request_body_limit(byte_size(first_chunk), config),
              {:ok, mint_conn} <- stream_mint_request_body(mint_conn, ref, first_chunk),
-             {:ok, mint_conn} <-
+             {:ok, plug_conn, mint_conn} <-
                stream_request_body(conn, mint_conn, ref, config, byte_size(first_chunk)),
              {:ok, mint_conn} <- stream_mint_request_body(mint_conn, ref, :eof) do
-          stream_response_with_mint(conn, mint_conn, ref, config)
+          stream_response_with_mint(plug_conn, mint_conn, ref, config)
         else
           {:error, :request_body_too_large} ->
             send_error_response(conn, 413, "Payload Too Large")
@@ -359,12 +359,12 @@ defmodule ReverseIt.HTTPProxy do
           stream_request_body(plug_conn, mint_conn, ref, config, bytes_seen)
         end
 
-      {:ok, final_chunk, _plug_conn} ->
+      {:ok, final_chunk, plug_conn} ->
         bytes_seen = bytes_seen + byte_size(final_chunk)
 
         with :ok <- ensure_request_body_limit(bytes_seen, config),
              {:ok, mint_conn} <- stream_mint_request_body(mint_conn, ref, final_chunk) do
-          {:ok, mint_conn}
+          {:ok, plug_conn, mint_conn}
         end
 
       {:error, reason} ->

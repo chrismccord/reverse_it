@@ -148,6 +148,23 @@ defmodule ReverseItTest do
     end
 
     @tag :streaming
+    test "keeps the client connection reusable after streaming a request body" do
+      {:ok, conn} = Mint.HTTP.connect(:http, "localhost", proxy_port())
+      body = :binary.copy("A", 2 * 1024 * 1024)
+
+      {:ok, conn, 200, upload_response} =
+        mint_request(conn, "POST", "/upload", body, 5_000)
+
+      assert Jason.decode!(upload_response)["received_bytes"] == byte_size(body)
+      assert Mint.HTTP.open?(conn)
+
+      {:ok, conn, 200, hello_response} = mint_request(conn, "GET", "/hello", "", 1_000)
+      assert hello_response == "Hello from backend!"
+
+      Mint.HTTP.close(conn)
+    end
+
+    @tag :streaming
     test "streams large response body back to client" do
       # Request 20MB download
       download_size = 20 * 1024 * 1024
@@ -522,6 +539,47 @@ defmodule ReverseItTest do
       Mint.HTTP.close(conn)
     end
   end
+
+  defp mint_request(conn, method, path, body, timeout) do
+    headers = [{"content-length", Integer.to_string(byte_size(body))}]
+    {:ok, conn, ref} = Mint.HTTP.request(conn, method, path, headers, body)
+    receive_mint_response(conn, ref, timeout, nil, [])
+  end
+
+  defp receive_mint_response(conn, ref, timeout, status, body) do
+    receive do
+      message ->
+        case Mint.HTTP.stream(conn, message) do
+          {:ok, conn, responses} ->
+            case reduce_mint_responses(responses, ref, status, body) do
+              {:done, status, body} ->
+                {:ok, conn, status, IO.iodata_to_binary(Enum.reverse(body))}
+
+              {:continue, status, body} ->
+                receive_mint_response(conn, ref, timeout, status, body)
+            end
+
+          :unknown ->
+            receive_mint_response(conn, ref, timeout, status, body)
+        end
+    after
+      timeout -> {:error, :timeout}
+    end
+  end
+
+  defp reduce_mint_responses([], _ref, status, body), do: {:continue, status, body}
+
+  defp reduce_mint_responses([{:status, ref, status} | rest], ref, _status, body),
+    do: reduce_mint_responses(rest, ref, status, body)
+
+  defp reduce_mint_responses([{:data, ref, data} | rest], ref, status, body),
+    do: reduce_mint_responses(rest, ref, status, [data | body])
+
+  defp reduce_mint_responses([{:done, ref} | _rest], ref, status, body),
+    do: {:done, status, body}
+
+  defp reduce_mint_responses([_response | rest], ref, status, body),
+    do: reduce_mint_responses(rest, ref, status, body)
 
   # Helper for WebSocket upgrade
   defp wait_for_ws_upgrade(conn, ref, timeout) do
