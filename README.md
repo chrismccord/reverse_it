@@ -6,6 +6,7 @@ A full-featured HTTP/1.1, optional HTTP/2, and WebSocket reverse proxy for Elixi
 
 - **Full HTTP Support**: HTTP/1.1 proxying by default, optional HTTP/2 upstreams, and streaming request/response bodies
 - **Connection Pooling**: Automatic connection pooling via Finch (50 connections per backend)
+- **One-Shot Upstreams**: Fresh HTTP/1.1 connections over TCP or Unix-domain sockets
 - **HTTP/2 Support**: Opt-in upstream HTTP/2 support with `protocols: [:http1, :http2]`
 - **WebSocket Proxying**: Bidirectional WebSocket frame forwarding with full protocol support
 - **Plug Integration**: Works as a standard Plug module in any Phoenix or Plug application
@@ -79,6 +80,29 @@ defmodule MyApp.ProxyPlug do
 end
 ```
 
+### One-Shot Unix-Socket Upstreams
+
+Use a one-shot upstream when every proxied request or WebSocket upgrade must
+receive a fresh connection to a local Unix-domain socket:
+
+```elixir
+ReverseIt.call(
+  conn,
+  ReverseIt.init(
+    name: MyApp.ReverseProxy,
+    backend: "http://provider-tunnel",
+    unix_socket: "/run/my_app/provider-tunnel.sock",
+    upstream_connection: :one_shot,
+    protocols: [:http1]
+  )
+)
+```
+
+The backend host remains the HTTP `Host` and WebSocket authority while
+`:unix_socket` selects the transport address. Unix-socket upstreams are local,
+unencrypted HTTP/1.1 only and always one-shot; ReverseIt never returns these
+connections to the Finch pool.
+
 ## Customizing Requests and Responses
 
 You can wrap ReverseIt in your own Plug to modify request headers, add response headers, implement authentication, logging, etc. Use `Plug.Conn.register_before_send/2` to modify responses before they're sent to the client.
@@ -141,6 +165,8 @@ end
 
 - `:name` (required) - Name of the Finch pool to use
 - `:backend` (required) - Backend URL (http://, https://, ws://, or wss://)
+- `:unix_socket` - Connect through this Unix-domain socket instead of the backend host/port
+- `:upstream_connection` - `:pooled` or `:one_shot` (default: `:pooled`)
 - `:strip_path` - Path prefix to strip from incoming requests
 - `:connect_timeout` - Backend connection timeout in milliseconds (default: 5,000)
 - `:pool_timeout` - Finch pool checkout timeout in milliseconds (default: 5,000)
@@ -238,6 +264,10 @@ Client → Phoenix/Bandit → ReverseIt (Plug) → Finch (connection pool) → B
                                      50 pooled HTTP/1.1 connections by default
 ```
 
+For `upstream_connection: :one_shot`, ReverseIt uses a fresh passive Mint
+HTTP/1.1 connection instead of Finch. This path supports both TCP and
+Unix-domain sockets and closes the upstream after the response.
+
 ### WebSocket Proxy Flow
 ```
 Client ↔ Phoenix/Bandit ↔ ReverseIt (Plug) ↔ ReverseIt.WebSocketProxy (WebSock) ↔ Mint.WebSocket ↔ Backend
@@ -270,6 +300,7 @@ lib/
     ├── application.ex       # OTP application supervisor
     ├── config.ex            # Configuration parser and validator
     ├── http_proxy.ex        # HTTP request proxying logic
+    ├── upstream.ex          # TCP/Unix one-shot Mint connections
     └── websocket_proxy.ex   # WebSocket proxy handler (WebSock behavior)
 
 test/
@@ -287,6 +318,7 @@ test/
 - Header forwarding, validation, and RFC hop-by-hop filtering
 - X-Forwarded-* headers
 - Connection pooling
+- Fresh one-shot TCP or Unix-domain socket connections
 - Path manipulation (strip_path, path_prefix)
 - Plug integration
 - Configuration module with validation

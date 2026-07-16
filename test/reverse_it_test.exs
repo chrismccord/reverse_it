@@ -23,9 +23,165 @@ defmodule ReverseItTest do
       assert config.max_websocket_frame_size == 16 * 1024 * 1024
       assert config.forwarded_headers == :append
     end
+
+    test "Unix sockets require one-shot HTTP/1 upstreams" do
+      path =
+        Path.join(
+          System.tmp_dir!(),
+          "reverse-it-config-#{System.unique_integer([:positive])}.sock"
+        )
+
+      assert {:error, "unix_socket requires upstream_connection: :one_shot"} =
+               ReverseIt.Config.parse(
+                 name: ReverseIt.TestFinch,
+                 backend: "http://provider-tunnel",
+                 unix_socket: path
+               )
+
+      assert {:ok, config} =
+               ReverseIt.Config.parse(
+                 name: ReverseIt.TestFinch,
+                 backend: "http://provider-tunnel",
+                 unix_socket: path,
+                 upstream_connection: :one_shot,
+                 protocols: [:http1]
+               )
+
+      assert config.unix_socket == path
+      assert config.upstream_connection == :one_shot
+    end
   end
 
   describe "HTTP Proxy" do
+    test "opens a fresh Unix-socket upstream for every request" do
+      path = Path.join(System.tmp_dir!(), "reverse-it-#{System.unique_integer([:positive])}.sock")
+      File.rm(path)
+
+      {:ok, listener} =
+        :gen_tcp.listen(0, [:binary, packet: :raw, active: false, ifaddr: {:local, path}])
+
+      on_exit(fn ->
+        :gen_tcp.close(listener)
+        File.rm(path)
+      end)
+
+      parent = self()
+
+      start_supervised!(
+        Supervisor.child_spec(
+          {Task,
+           fn ->
+             for number <- 1..2 do
+               {:ok, socket} = :gen_tcp.accept(listener)
+               {:ok, request} = recv_http_request(socket, "")
+               send(parent, {:unix_upstream_request, number, request})
+               body = "response-#{number}"
+
+               :ok =
+                 :gen_tcp.send(
+                   socket,
+                   "HTTP/1.1 200 OK\r\ncontent-length: #{byte_size(body)}\r\nconnection: close\r\n\r\n#{body}"
+                 )
+
+               :gen_tcp.close(socket)
+             end
+           end},
+          id: {:unix_upstream, make_ref()}
+        )
+      )
+
+      opts =
+        ReverseIt.init(
+          name: ReverseIt.TestFinch,
+          backend: "http://provider-tunnel",
+          unix_socket: path,
+          upstream_connection: :one_shot,
+          protocols: [:http1]
+        )
+
+      first = Plug.Test.conn("POST", "/first", "one") |> ReverseIt.call(opts)
+      second = Plug.Test.conn("POST", "/second", "two") |> ReverseIt.call(opts)
+
+      assert first.status == 200
+      assert first.resp_body == "response-1"
+      assert second.status == 200
+      assert second.resp_body == "response-2"
+
+      assert_receive {:unix_upstream_request, 1, first_request}
+      assert first_request =~ "POST /first HTTP/1.1"
+      assert first_request =~ "\r\n\r\none"
+
+      assert_receive {:unix_upstream_request, 2, second_request}
+      assert second_request =~ "POST /second HTTP/1.1"
+      assert second_request =~ "\r\n\r\ntwo"
+    end
+
+    test "preserves bodyless response semantics over a Unix socket" do
+      path =
+        Path.join(
+          System.tmp_dir!(),
+          "reverse-it-empty-#{System.unique_integer([:positive])}.sock"
+        )
+
+      File.rm(path)
+
+      {:ok, listener} =
+        :gen_tcp.listen(0, [:binary, packet: :raw, active: false, ifaddr: {:local, path}])
+
+      on_exit(fn ->
+        :gen_tcp.close(listener)
+        File.rm(path)
+      end)
+
+      start_supervised!(
+        Supervisor.child_spec(
+          {Task,
+           fn ->
+             {:ok, head_socket} = :gen_tcp.accept(listener)
+             {:ok, _request} = recv_http_request(head_socket, "")
+
+             :ok =
+               :gen_tcp.send(
+                 head_socket,
+                 "HTTP/1.1 200 OK\r\ncontent-length: 7\r\nconnection: close\r\n\r\n"
+               )
+
+             :gen_tcp.close(head_socket)
+
+             {:ok, empty_socket} = :gen_tcp.accept(listener)
+             {:ok, _request} = recv_http_request(empty_socket, "")
+
+             :ok =
+               :gen_tcp.send(
+                 empty_socket,
+                 "HTTP/1.1 204 No Content\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+               )
+
+             :gen_tcp.close(empty_socket)
+           end},
+          id: {:unix_empty_upstream, make_ref()}
+        )
+      )
+
+      opts =
+        ReverseIt.init(
+          name: ReverseIt.TestFinch,
+          backend: "http://provider-tunnel",
+          unix_socket: path,
+          upstream_connection: :one_shot,
+          protocols: [:http1]
+        )
+
+      head = Plug.Test.conn("HEAD", "/head") |> ReverseIt.call(opts)
+      empty = Plug.Test.conn("GET", "/empty") |> ReverseIt.call(opts)
+
+      assert head.status == 200
+      assert head.resp_body == ""
+      assert Plug.Conn.get_resp_header(head, "content-length") == ["7"]
+      assert empty.status == 204
+      assert empty.resp_body == ""
+    end
+
     test "proxies simple GET request" do
       response = Req.get!("#{proxy_url()}/hello")
       assert response.status == 200
@@ -119,6 +275,51 @@ defmodule ReverseItTest do
       response = Req.get!("#{backend_url()}/hello")
       assert response.status == 200
       assert response.body == "Hello from backend!"
+    end
+  end
+
+  defp recv_http_request(socket, acc) do
+    case complete_http_request?(acc) do
+      true ->
+        {:ok, acc}
+
+      false ->
+        case :gen_tcp.recv(socket, 0, 1_000) do
+          {:ok, data} -> recv_http_request(socket, acc <> data)
+          {:error, reason} -> {:error, reason}
+        end
+    end
+  end
+
+  defp complete_http_request?(request) do
+    case :binary.match(request, "\r\n\r\n") do
+      {index, length} ->
+        headers = binary_part(request, 0, index)
+        body_offset = index + length
+        body_bytes = byte_size(request) - body_offset
+
+        content_length =
+          headers
+          |> String.split("\r\n")
+          |> Enum.find_value(0, fn line ->
+            case String.split(line, ":", parts: 2) do
+              [name, value] ->
+                if String.downcase(name) == "content-length" do
+                  case Integer.parse(String.trim(value)) do
+                    {value, ""} -> value
+                    _invalid -> 0
+                  end
+                end
+
+              _other ->
+                nil
+            end
+          end)
+
+        body_bytes >= content_length
+
+      :nomatch ->
+        false
     end
   end
 
@@ -254,6 +455,58 @@ defmodule ReverseItTest do
   end
 
   describe "WebSocket Proxy" do
+    @tag :websocket
+    test "proxies WebSocket messages through a Unix socket" do
+      path =
+        Path.join(System.tmp_dir!(), "reverse-it-ws-#{System.unique_integer([:positive])}.sock")
+
+      proxy_port = TestHelper.find_available_port()
+      File.rm(path)
+
+      start_supervised!(
+        Supervisor.child_spec(
+          {Bandit,
+           plug: ReverseIt.TestBackend,
+           scheme: :http,
+           ip: {:local, path},
+           port: 0,
+           thousand_island_options: [silent_terminate_on_error: true]},
+          id: {:unix_websocket_backend, make_ref()}
+        )
+      )
+
+      start_supervised!(
+        Supervisor.child_spec(
+          {Bandit,
+           plug:
+             {ReverseIt.TestUnixProxy,
+              name: ReverseIt.TestFinch,
+              backend: "ws://provider-tunnel",
+              unix_socket: path,
+              upstream_connection: :one_shot,
+              protocols: [:http1]},
+           scheme: :http,
+           port: proxy_port,
+           thousand_island_options: [silent_terminate_on_error: true]},
+          id: {:unix_websocket_proxy, make_ref()}
+        )
+      )
+
+      on_exit(fn -> File.rm(path) end)
+
+      {:ok, conn} = Mint.HTTP.connect(:http, "localhost", proxy_port)
+      {:ok, conn, ref} = Mint.WebSocket.upgrade(:ws, conn, "/ws", [])
+      {:ok, conn, websocket} = wait_for_ws_upgrade(conn, ref, 5_000)
+      {:ok, websocket, data} = Mint.WebSocket.encode(websocket, {:text, "over-uds"})
+      {:ok, conn} = Mint.WebSocket.stream_request_body(conn, ref, data)
+      {conn, websocket, received_data} = receive_ws_data(conn, websocket, ref, 2_000)
+      {:ok, _websocket, frames} = Mint.WebSocket.decode(websocket, received_data)
+
+      assert {:text, "Backend echo: over-uds"} in frames
+
+      Mint.HTTP.close(conn)
+    end
+
     @tag :websocket
     test "detects WebSocket upgrade request" do
       # Connect directly to proxy with WebSocket upgrade headers

@@ -9,6 +9,7 @@ defmodule ReverseIt do
 
   - **Full HTTP Support**: HTTP/1.1 proxying by default, optional HTTP/2 upstreams, and streaming request/response bodies
   - **Connection Pooling**: Uses Finch for automatic connection pooling and reuse across requests
+  - **One-Shot Upstreams**: Fresh HTTP/1.1 connections over TCP or Unix-domain sockets
   - **HTTP/2 Support**: Opt-in upstream HTTP/2 support with `protocols: [:http1, :http2]`
   - **WebSocket Proxying**: Bidirectional WebSocket frame forwarding with full protocol support
   - **Plug Integration**: Works as a standard Plug module in any Phoenix or Plug application
@@ -76,6 +77,24 @@ defmodule ReverseIt do
           protocols: [:http1, :http2]
       end
 
+  ### One-Shot Unix-Socket Upstreams
+
+      ReverseIt.call(
+        conn,
+        ReverseIt.init(
+          name: MyApp.ReverseProxy,
+          backend: "http://provider-tunnel",
+          unix_socket: "/run/my_app/provider-tunnel.sock",
+          upstream_connection: :one_shot,
+          protocols: [:http1]
+        )
+      )
+
+  `:unix_socket` selects the transport address while the backend host remains
+  the HTTP authority. Unix-socket upstreams support local, unencrypted HTTP/1.1
+  and WebSocket traffic. They always use a fresh connection and never enter the
+  Finch pool.
+
   ## Configuration Options
 
   ### Supervisor Options (when starting ReverseIt)
@@ -91,6 +110,8 @@ defmodule ReverseIt do
 
     * `:name` (required) - Name of the Finch pool to use
     * `:backend` (required) - Backend URL (http://, https://, ws://, or wss://)
+    * `:unix_socket` - Connect through this Unix-domain socket instead of the backend host/port
+    * `:upstream_connection` - `:pooled` or `:one_shot` (default: `:pooled`)
     * `:strip_path` - Path prefix to strip from incoming requests before proxying
     * `:connect_timeout` - Backend connection timeout in milliseconds (default: 5_000)
     * `:pool_timeout` - Finch pool checkout timeout in milliseconds (default: 5_000)

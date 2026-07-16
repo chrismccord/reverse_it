@@ -15,6 +15,8 @@ defmodule ReverseIt.Config do
     :scheme,
     :host,
     :port,
+    :unix_socket,
+    :upstream_connection,
     :path_prefix,
     :strip_path,
     :connect_timeout,
@@ -54,6 +56,8 @@ defmodule ReverseIt.Config do
           scheme: :http | :https | :ws | :wss,
           host: String.t(),
           port: non_neg_integer(),
+          unix_socket: String.t() | nil,
+          upstream_connection: :pooled | :one_shot,
           path_prefix: String.t() | nil,
           strip_path: String.t() | nil,
           connect_timeout: non_neg_integer(),
@@ -95,6 +99,8 @@ defmodule ReverseIt.Config do
 
     * `:name` - Name of the Finch pool to use (required)
     * `:backend` - Backend URL (required). Can be http://, https://, ws://, or wss://
+    * `:unix_socket` - Connect to this Unix-domain socket instead of the backend host/port
+    * `:upstream_connection` - `:pooled` or `:one_shot` (default: `:pooled`)
     * `:strip_path` - Path prefix to strip from incoming requests before proxying
     * `:connect_timeout` - Connection timeout in milliseconds (default: 5_000)
     * `:pool_timeout` - Finch pool checkout timeout in milliseconds (default: 5_000)
@@ -139,7 +145,8 @@ defmodule ReverseIt.Config do
          {:ok, host} <- validate_host(uri.host),
          {:ok, port} <- validate_port(uri.port, scheme),
          {:ok, name} <- fetch_name(opts),
-         {:ok, config} <- build_config(opts, name, scheme, host, port, uri) do
+         {:ok, config} <- build_config(opts, name, scheme, host, port, uri),
+         :ok <- validate_connection_config(config) do
       {:ok, config}
     end
   end
@@ -233,6 +240,8 @@ defmodule ReverseIt.Config do
              scheme: scheme,
              host: host,
              port: port,
+             unix_socket: Keyword.get(opts, :unix_socket),
+             upstream_connection: Keyword.get(opts, :upstream_connection, :pooled),
              path_prefix: normalize_path(uri.path),
              strip_path: normalize_path(opts[:strip_path]),
              connect_timeout: Keyword.get(opts, :connect_timeout, 5_000),
@@ -366,6 +375,29 @@ defmodule ReverseIt.Config do
 
   defp validate_error_response(_response) do
     {:error, "error_response must be a {status, body} tuple with a 4xx/5xx status"}
+  end
+
+  defp validate_connection_config(%__MODULE__{} = config) do
+    cond do
+      config.upstream_connection not in [:pooled, :one_shot] ->
+        {:error, "upstream_connection must be :pooled or :one_shot"}
+
+      not is_nil(config.unix_socket) and
+          (not is_binary(config.unix_socket) or config.unix_socket == "") ->
+        {:error, "unix_socket must be a non-empty string"}
+
+      is_binary(config.unix_socket) and config.scheme not in [:http, :ws] ->
+        {:error, "unix_socket supports only http and ws backends"}
+
+      is_binary(config.unix_socket) and config.upstream_connection != :one_shot ->
+        {:error, "unix_socket requires upstream_connection: :one_shot"}
+
+      config.upstream_connection == :one_shot and config.protocols != [:http1] ->
+        {:error, "one-shot upstream connections require protocols: [:http1]"}
+
+      true ->
+        :ok
+    end
   end
 
   defp normalize_config_headers(headers) do

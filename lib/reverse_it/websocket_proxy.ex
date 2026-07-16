@@ -5,7 +5,7 @@ defmodule ReverseIt.WebSocketProxy do
   """
 
   require Logger
-  alias ReverseIt.{Config, Headers}
+  alias ReverseIt.{Config, Headers, Upstream}
 
   @behaviour WebSock
 
@@ -44,12 +44,7 @@ defmodule ReverseIt.WebSocketProxy do
     client = Keyword.fetch!(opts, :client)
 
     # Connect to backend
-    scheme = Config.http_scheme(config)
-
-    case Mint.HTTP.connect(scheme, config.host, config.port,
-           protocols: [:http1],
-           transport_opts: Config.transport_opts(config)
-         ) do
+    case Upstream.connect(config) do
       {:ok, conn} ->
         # Build target path
         target_path = Config.build_target_path(config, Keyword.get(opts, :path, "/"))
