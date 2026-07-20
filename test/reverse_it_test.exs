@@ -9,6 +9,30 @@ defmodule ReverseItTest do
   defp backend_port, do: Application.get_env(:reverse_it, :test_backend_port)
 
   describe "Configuration" do
+    test "enables IPv6 transport for an IPv6 literal backend" do
+      assert {:ok, config} =
+               ReverseIt.Config.parse(
+                 name: ReverseIt.TestFinch,
+                 backend: "http://[fdaa:0:1::2]:4001",
+                 upstream_connection: :one_shot
+               )
+
+      assert ReverseIt.Config.transport_opts(config)[:inet6]
+    end
+
+    test "keeps the default transport for IPv4 and hostname backends" do
+      for backend <- ["http://127.0.0.1:4001", "http://example.internal:4001"] do
+        assert {:ok, config} =
+                 ReverseIt.Config.parse(
+                   name: ReverseIt.TestFinch,
+                   backend: backend,
+                   upstream_connection: :one_shot
+                 )
+
+        refute Keyword.has_key?(ReverseIt.Config.transport_opts(config), :inet6)
+      end
+    end
+
     test "uses hardened router-style defaults" do
       {:ok, config} =
         ReverseIt.Config.parse(

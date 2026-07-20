@@ -215,12 +215,21 @@ defmodule ReverseIt.Config do
   """
   @spec transport_opts(t()) :: keyword()
   def transport_opts(%__MODULE__{} = config) do
-    opts = [timeout: config.connect_timeout]
+    opts =
+      [timeout: config.connect_timeout]
+      |> maybe_enable_ipv6(config.host)
 
     if config.scheme in [:https, :wss] and config.verify_tls == false do
       Keyword.put(opts, :verify, :verify_none)
     else
       opts
+    end
+  end
+
+  defp maybe_enable_ipv6(opts, host) do
+    case :inet.parse_address(String.to_charlist(host)) do
+      {:ok, address} when tuple_size(address) == 8 -> Keyword.put(opts, :inet6, true)
+      _other -> opts
     end
   end
 
