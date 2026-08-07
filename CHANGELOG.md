@@ -1,5 +1,8 @@
 # Changelog
 
+## v0.2.2 (2026-08-07)
+- Support IPV6 in one-shot Unix socket upstreams
+
 ## v0.2.1 (2026-07-20)
 - Support one-shot Unix socket upstreams
 
