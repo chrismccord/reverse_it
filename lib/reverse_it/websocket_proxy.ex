@@ -39,6 +39,8 @@ defmodule ReverseIt.WebSocketProxy do
   - client_headers: Original client headers for forwarding
   """
   @impl WebSock
+  def init(%__MODULE__{} = state), do: {:ok, state}
+
   def init(opts) do
     config = Keyword.fetch!(opts, :config)
     client = Keyword.fetch!(opts, :client)

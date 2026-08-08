@@ -33,6 +33,25 @@ defmodule ReverseItTest do
       end
     end
 
+    test "preserves offered WebSocket subprotocols for the backend handshake" do
+      assert {:ok, config} =
+               ReverseIt.Config.parse(
+                 name: ReverseIt.TestFinch,
+                 backend: "http://127.0.0.1:4001"
+               )
+
+      client = %{
+        headers: [{"sec-websocket-protocol", "first, second"}],
+        remote_ip: "127.0.0.1",
+        scheme: "http",
+        host: "example.test"
+      }
+
+      headers = ReverseIt.Headers.websocket_request_headers(client, config)
+
+      assert {"sec-websocket-protocol", "first, second"} in headers
+    end
+
     test "uses hardened router-style defaults" do
       {:ok, config} =
         ReverseIt.Config.parse(
@@ -479,6 +498,17 @@ defmodule ReverseItTest do
   end
 
   describe "WebSocket Proxy" do
+    @tag :websocket
+    test "returns a backend WebSocket rejection without upgrading the client" do
+      {:ok, conn} = Mint.HTTP.connect(:http, "localhost", proxy_port())
+      {:ok, conn, ref} = Mint.WebSocket.upgrade(:ws, conn, "/ws-reject", [])
+
+      assert {:ok, conn, 403, "websocket rejected"} =
+               receive_mint_response(conn, ref, 5_000, nil, [])
+
+      Mint.HTTP.close(conn)
+    end
+
     @tag :websocket
     test "proxies WebSocket messages through a Unix socket" do
       path =

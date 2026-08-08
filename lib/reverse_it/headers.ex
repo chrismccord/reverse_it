@@ -43,13 +43,17 @@ defmodule ReverseIt.Headers do
   Builds safe backend WebSocket upgrade headers from client request metadata.
   """
   def websocket_request_headers(client, config) do
-    client.headers
-    |> normalize_headers()
+    headers = normalize_headers(client.headers)
+
+    protocols = Enum.filter(headers, fn {name, _value} -> name == "sec-websocket-protocol" end)
+
+    headers
     |> strip_hop_by_hop()
     |> reject_header_names(@websocket_headers)
     |> remove_configured_headers(config)
     |> add_forwarded_headers(config, client)
     |> replace_host_header(config)
+    |> add_websocket_protocols(protocols, config)
     |> add_configured_headers(config)
   end
 
@@ -144,6 +148,17 @@ defmodule ReverseIt.Headers do
     Enum.reduce(config.add_headers, headers, fn {name, value}, acc ->
       List.keystore(acc, name, 0, {name, value})
     end)
+  end
+
+  defp add_websocket_protocols(headers, protocols, config) do
+    configured? =
+      Enum.any?(config.add_headers, fn {name, _value} -> name == "sec-websocket-protocol" end)
+
+    if configured? or MapSet.member?(config.remove_headers, "sec-websocket-protocol") do
+      headers
+    else
+      headers ++ protocols
+    end
   end
 
   defp add_forwarded_headers(headers, %{forwarded_headers: false}, _client), do: headers

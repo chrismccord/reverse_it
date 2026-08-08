@@ -223,7 +223,7 @@ defmodule ReverseIt do
   @behaviour Plug
 
   require Logger
-  alias ReverseIt.{Config, Headers, HTTPProxy, WebSocketProxy}
+  alias ReverseIt.{Config, Headers, HTTPProxy, WebSocketHandshake, WebSocketProxy}
 
   @doc """
   Child spec for starting ReverseIt with a Finch connection pool.
@@ -339,14 +339,6 @@ defmodule ReverseIt do
       host: forwarded_host(conn)
     }
 
-    # Prepare options for WebSocket proxy
-    opts = [
-      config: config,
-      client: client,
-      path: conn.request_path,
-      query_string: conn.query_string
-    ]
-
     connection_opts =
       [
         timeout: config.websocket_idle_timeout,
@@ -358,10 +350,25 @@ defmodule ReverseIt do
       |> maybe_put_opt(:fullsweep_after, config.websocket_fullsweep_after)
       |> maybe_put_opt(:max_heap_size, config.websocket_max_heap_size)
 
-    # Upgrade connection using WebSockAdapter
-    # This will call WebSocketProxy.init/1 and handle the WebSocket lifecycle
     try do
-      WebSockAdapter.upgrade(conn, WebSocketProxy, opts, connection_opts)
+      WebSockAdapter.UpgradeValidation.validate_upgrade!(conn)
+
+      case WebSocketHandshake.open(config, client, conn.request_path, conn.query_string) do
+        {:ok, state, response_headers} ->
+          conn
+          |> Plug.Conn.prepend_resp_headers(response_headers)
+          |> WebSockAdapter.upgrade(WebSocketProxy, state, connection_opts)
+
+        {:reject, status, response_headers, body} ->
+          conn
+          |> Plug.Conn.prepend_resp_headers(response_headers)
+          |> Plug.Conn.send_resp(status, body)
+
+        {:error, reason} ->
+          Logger.debug("Backend WebSocket upgrade failed: #{inspect(reason)}")
+          {status, body} = config.error_response
+          Plug.Conn.send_resp(conn, status, body)
+      end
     rescue
       error in WebSockAdapter.UpgradeError ->
         Logger.debug("Invalid WebSocket upgrade request: #{Exception.message(error)}")

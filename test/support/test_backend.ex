@@ -70,6 +70,12 @@ defmodule ReverseIt.TestBackend do
   end
 
   # WebSocket endpoint
+  get "/ws-reject" do
+    conn
+    |> put_resp_content_type("text/plain")
+    |> send_resp(403, "websocket rejected")
+  end
+
   get "/ws" do
     conn
     |> WebSockAdapter.upgrade(ReverseIt.TestBackend.WebSocketHandler, [], [])
