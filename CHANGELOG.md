@@ -1,5 +1,8 @@
 # Changelog
 
+## v0.2.3 (2026-08-08)
+- Upgrade ws with full subprotocol negotiation
+
 ## v0.2.2 (2026-08-07)
 - Support IPV6 in one-shot Unix socket upstreams
 
