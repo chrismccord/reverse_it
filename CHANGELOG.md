@@ -1,8 +1,8 @@
 # Changelog
 
 ## v0.2.4 (2026-08-11)
-- Consume `Expect: 100-continue` after the downstream server accepts the request body instead of forwarding a stale expectation upstream.
-- Wait for a final upstream response when the transport emits informational `1xx` response blocks.
+- Consume `Expect: 100-continue` after the downstream server accepts the request body instead of forwarding a stale expectation upstream
+- Wait for a final upstream response when the transport emits informational `1xx` response blocks
 
 ## v0.2.3 (2026-08-08)
 - Upgrade ws with full subprotocol negotiation
