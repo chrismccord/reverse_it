@@ -26,6 +26,8 @@ defmodule ReverseIt.Headers do
                      "transfer-encoding"
                    ])
 
+  @consumed_request_headers MapSet.new(["expect"])
+
   @doc """
   Builds safe backend HTTP request headers from a Plug connection.
   """
@@ -33,6 +35,7 @@ defmodule ReverseIt.Headers do
     conn.req_headers
     |> normalize_headers()
     |> strip_hop_by_hop()
+    |> reject_header_names(@consumed_request_headers)
     |> remove_configured_headers(config)
     |> add_forwarded_headers(config, forwarded_info(conn))
     |> replace_host_header(config)

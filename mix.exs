@@ -1,7 +1,7 @@
 defmodule ReverseIt.MixProject do
   use Mix.Project
 
-  @version "0.2.3"
+  @version "0.2.4"
   @source_url "https://github.com/chrismccord/reverse_it"
 
   def project do

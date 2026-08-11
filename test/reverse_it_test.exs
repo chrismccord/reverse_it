@@ -96,6 +96,61 @@ defmodule ReverseItTest do
   end
 
   describe "HTTP Proxy" do
+    test "does not forward an expectation already consumed by the proxy" do
+      {:ok, listener} =
+        :gen_tcp.listen(0, [
+          :binary,
+          packet: :raw,
+          active: false,
+          reuseaddr: true,
+          ip: {127, 0, 0, 1}
+        ])
+
+      {:ok, port} = :inet.port(listener)
+      on_exit(fn -> :gen_tcp.close(listener) end)
+
+      parent = self()
+
+      start_supervised!(
+        Supervisor.child_spec(
+          {Task,
+           fn ->
+             {:ok, socket} = :gen_tcp.accept(listener)
+             {:ok, request} = recv_http_request(socket, "")
+             send(parent, {:upstream_request, request})
+
+             :ok =
+               :gen_tcp.send(
+                 socket,
+                 "HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok"
+               )
+
+             :gen_tcp.close(socket)
+           end},
+          id: {:informational_upstream, make_ref()}
+        )
+      )
+
+      opts =
+        ReverseIt.init(
+          name: ReverseIt.TestFinch,
+          backend: "http://127.0.0.1:#{port}",
+          upstream_connection: :one_shot,
+          protocols: [:http1]
+        )
+
+      response =
+        "PUT"
+        |> Plug.Test.conn("/object", "payload")
+        |> Plug.Conn.put_req_header("expect", "100-continue")
+        |> ReverseIt.call(opts)
+
+      assert response.status == 200
+      assert response.resp_body == "ok"
+      assert_receive {:upstream_request, request}
+      refute String.downcase(request) =~ "expect:"
+    end
+
     test "opens a fresh Unix-socket upstream for every request" do
       path = Path.join(System.tmp_dir!(), "reverse-it-#{System.unique_integer([:positive])}.sock")
       File.rm(path)

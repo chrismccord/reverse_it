@@ -147,6 +147,9 @@ defmodule ReverseIt.HTTPProxy do
       response_content_length_exceeds?(acc.headers, acc.config) ->
         {:halt, %{acc | error: :response_body_too_large}}
 
+      informational_response?(acc.status) ->
+        {:cont, %{acc | status: nil, headers: []}}
+
       not send_body?(acc.method, acc.status) ->
         send_empty_response(acc)
 
@@ -519,10 +522,15 @@ defmodule ReverseIt.HTTPProxy do
         headers = headers ++ new_headers
 
         if header_block_within_limit?(headers, config) do
-          if status != nil do
-            {:headers_complete, status, headers, rest}
-          else
-            process_header_responses(rest, ref, status, headers, config)
+          cond do
+            informational_response?(status) ->
+              process_header_responses(rest, ref, nil, [], config)
+
+            status != nil ->
+              {:headers_complete, status, headers, rest}
+
+            true ->
+              process_header_responses(rest, ref, status, headers, config)
           end
         else
           {:error, :response_headers_too_large}
@@ -544,6 +552,8 @@ defmodule ReverseIt.HTTPProxy do
       total + byte_size(name) + 2 + byte_size(value)
     end) <= config.max_response_header_bytes
   end
+
+  defp informational_response?(status), do: status in 100..199 and status != 101
 
   defp receive_response_body(acc, mint_conn, ref, config) do
     case Mint.HTTP.recv(mint_conn, 0, config.upstream_idle_timeout) do
