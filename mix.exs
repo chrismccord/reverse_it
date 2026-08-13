@@ -1,7 +1,7 @@
 defmodule ReverseIt.MixProject do
   use Mix.Project
 
-  @version "0.2.5"
+  @version "0.2.6"
   @source_url "https://github.com/chrismccord/reverse_it"
 
   def project do
@@ -35,7 +35,7 @@ defmodule ReverseIt.MixProject do
   defp deps do
     [
       {:plug, "~> 1.16"},
-      {:finch, "~> 0.19"},
+      {:finch, "~> 0.23"},
       {:mint, "~> 1.6"},
       {:mint_web_socket, "~> 1.0"},
       {:websock, "~> 0.5"},

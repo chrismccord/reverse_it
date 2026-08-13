@@ -268,6 +268,10 @@ For `upstream_connection: :one_shot`, ReverseIt uses a fresh passive Mint
 HTTP/1.1 connection instead of Finch. This path supports both TCP and
 Unix-domain sockets and closes the upstream after the response.
 
+Pooled HTTP/1 requests retain their checked-out connection while streaming
+request bodies in bounded chunks. Large uploads therefore remain memory-bounded
+without giving up upstream connection reuse.
+
 ### WebSocket Proxy Flow
 ```
 Client ↔ Phoenix/Bandit ↔ ReverseIt (Plug) ↔ ReverseIt.WebSocketProxy (WebSock) ↔ Mint.WebSocket ↔ Backend

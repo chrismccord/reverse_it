@@ -55,6 +55,15 @@ defmodule ReverseIt.TestBackend do
     |> send_resp(200, Jason.encode!(%{received_bytes: total_size}))
   end
 
+  post "/upload-peer" do
+    peer_port = get_peer_data(conn).port
+    {total_size, conn} = stream_request_body(conn, 0)
+
+    conn
+    |> put_resp_content_type("application/json")
+    |> send_resp(200, Jason.encode!(%{received_bytes: total_size, peer_port: peer_port}))
+  end
+
   # Large download endpoint - streams response body
   get "/download/:size" do
     size = String.to_integer(size)

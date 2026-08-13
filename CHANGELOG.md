@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.2.6 (2026-08-13)
+- Stream large HTTP/1 request bodies through pooled Finch connections instead of opening a fresh upstream connection per request.
+- Require Finch 0.23 for accumulator-aware request body streaming.
+
 ## v0.2.5 (2026-08-13)
 - Abort downstream responses when an upstream body terminates early instead of completing a truncated response.
 - Add bounded pre-header retries for replay-safe `GET` and `HEAD` requests.

@@ -421,7 +421,7 @@ defmodule ReverseItTest do
         )
       )
 
-      assert {:error, %Req.TransportError{reason: :closed}} =
+      assert {:error, %{reason: :closed}} =
                Req.get("http://127.0.0.1:#{proxy_port}/object", retry: false)
     end
 
@@ -529,7 +529,7 @@ defmodule ReverseItTest do
 
   describe "Streaming Proxy" do
     @tag :streaming
-    test "streams large request body using Mint fallback" do
+    test "streams a large request body through the upstream pool" do
       # Create a body that exceeds the default in-memory buffer threshold.
       # We'll use 15MB to trigger request streaming.
       body_size = 15 * 1024 * 1024
@@ -567,6 +567,18 @@ defmodule ReverseItTest do
       assert hello_response == "Hello from backend!"
 
       Mint.HTTP.close(conn)
+    end
+
+    @tag :streaming
+    test "reuses a pooled upstream connection for streaming request bodies" do
+      body = :binary.copy("A", 2 * 1024 * 1024)
+
+      first = Req.post!("#{proxy_url()}/upload-peer", body: body, retry: false)
+      second = Req.post!("#{proxy_url()}/upload-peer", body: body, retry: false)
+
+      assert first.body["received_bytes"] == byte_size(body)
+      assert second.body["received_bytes"] == byte_size(body)
+      assert second.body["peer_port"] == first.body["peer_port"]
     end
 
     @tag :streaming

@@ -27,7 +27,11 @@ defmodule ReverseIt.HTTPProxy do
         {:more, first_chunk, conn} ->
           if within_request_body_limit?(byte_size(first_chunk), config) do
             Logger.debug("Request body exceeds buffer threshold, using streaming proxy")
-            stream_request_with_mint(conn, url, headers, first_chunk, config)
+
+            case config.upstream_connection do
+              :pooled -> stream_request_with_finch(conn, url, headers, first_chunk, config)
+              :one_shot -> stream_request_with_mint(conn, url, headers, first_chunk, config)
+            end
           else
             send_error_response(conn, 413, "Payload Too Large")
           end
@@ -106,7 +110,12 @@ defmodule ReverseIt.HTTPProxy do
   end
 
   defp stream_response_with_finch(conn, request, config, retries_left) do
-    acc = %{
+    acc = response_acc(conn, config)
+    do_stream_response_with_finch(request, acc, retries_left)
+  end
+
+  defp response_acc(conn, config) do
+    %{
       conn: conn,
       config: config,
       method: conn.method,
@@ -116,6 +125,10 @@ defmodule ReverseIt.HTTPProxy do
       response_bytes: 0,
       error: nil
     }
+  end
+
+  defp do_stream_response_with_finch(request, acc, retries_left) do
+    config = acc.config
 
     opts = [
       pool_timeout: config.pool_timeout,
@@ -293,6 +306,14 @@ defmodule ReverseIt.HTTPProxy do
     send_error_response(conn, 502, "Bad Gateway: Invalid response header")
   end
 
+  defp send_proxy_error(conn, _config, :request_body_too_large) do
+    send_error_response(conn, 413, "Payload Too Large")
+  end
+
+  defp send_proxy_error(conn, _config, {:request_body_read_failed, _reason}) do
+    send_error_response(conn, 400, "Bad Request")
+  end
+
   defp send_proxy_error(conn, config, reason) do
     Logger.error("Failed to proxy response: #{inspect(reason)}")
     send_configured_bad_gateway(conn, config)
@@ -314,6 +335,56 @@ defmodule ReverseIt.HTTPProxy do
       url <> "?" <> query_string
     else
       url
+    end
+  end
+
+  defp stream_request_with_finch(conn, url, headers, first_chunk, config) do
+    acc =
+      conn
+      |> response_acc(config)
+      |> Map.merge(%{
+        request_body_chunk: first_chunk,
+        request_body_done?: false,
+        request_bytes: byte_size(first_chunk)
+      })
+
+    request = Finch.build(conn.method, url, headers, {:stream, &next_request_body/1})
+    do_stream_response_with_finch(request, acc, 0)
+  end
+
+  defp next_request_body(%{request_body_chunk: chunk} = acc) when is_binary(chunk) do
+    {:data, chunk, %{acc | request_body_chunk: nil}}
+  end
+
+  defp next_request_body(%{request_body_done?: true} = acc), do: {:done, acc}
+
+  defp next_request_body(acc) do
+    opts = [
+      length: acc.config.request_body_chunk_size,
+      read_length: acc.config.request_body_chunk_size,
+      read_timeout: acc.config.request_body_read_timeout
+    ]
+
+    case Plug.Conn.read_body(acc.conn, opts) do
+      {:more, chunk, conn} ->
+        continue_request_body(acc, conn, chunk, false)
+
+      {:ok, chunk, conn} ->
+        continue_request_body(acc, conn, chunk, true)
+
+      {:error, reason} ->
+        {:halt, %{acc | error: {:request_body_read_failed, reason}}}
+    end
+  end
+
+  defp continue_request_body(acc, conn, chunk, done?) do
+    request_bytes = acc.request_bytes + byte_size(chunk)
+    acc = %{acc | conn: conn, request_body_done?: done?, request_bytes: request_bytes}
+
+    case ensure_request_body_limit(request_bytes, acc.config) do
+      :ok when chunk == "" and done? -> {:done, acc}
+      :ok -> {:data, chunk, acc}
+      {:error, :request_body_too_large} -> {:halt, %{acc | error: :request_body_too_large}}
     end
   end
 
@@ -638,6 +709,11 @@ defmodule ReverseIt.HTTPProxy do
   defp abort_downstream!(reason), do: exit({:upstream_stream_failed, reason})
 
   defp retry_response_headers?(method, %Mint.TransportError{reason: reason}, retries_left)
+       when method in ["GET", "HEAD"] and retries_left > 0 and
+              reason in [:closed, :econnreset],
+       do: true
+
+  defp retry_response_headers?(method, %Finch.TransportError{reason: reason}, retries_left)
        when method in ["GET", "HEAD"] and retries_left > 0 and
               reason in [:closed, :econnreset],
        do: true
