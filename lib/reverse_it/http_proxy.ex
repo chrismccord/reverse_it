@@ -102,6 +102,10 @@ defmodule ReverseIt.HTTPProxy do
   end
 
   defp stream_response_with_finch(conn, request, config) do
+    stream_response_with_finch(conn, request, config, config.response_header_retries)
+  end
+
+  defp stream_response_with_finch(conn, request, config, retries_left) do
     acc = %{
       conn: conn,
       config: config,
@@ -122,19 +126,26 @@ defmodule ReverseIt.HTTPProxy do
       {:ok, %{sent?: false, error: nil} = acc} ->
         send_unsent_response(acc)
 
-      {:ok, %{sent?: true, conn: conn}} ->
+      {:ok, %{sent?: true, error: nil, conn: conn}} ->
         conn
+
+      {:ok, %{sent?: true, error: reason}} ->
+        abort_downstream!(reason)
 
       {:ok, %{sent?: false, error: reason, conn: conn, config: config}} ->
         send_proxy_error(conn, config, reason)
 
       {:error, reason, %{sent?: false, conn: conn, config: config}} ->
-        Logger.error("Failed to proxy request: #{inspect(reason)}")
-        send_configured_bad_gateway(conn, config)
+        if retry_response_headers?(conn.method, reason, retries_left) do
+          stream_response_with_finch(conn, request, config, retries_left - 1)
+        else
+          Logger.error("Failed to proxy request: #{inspect(reason)}")
+          send_configured_bad_gateway(conn, config)
+        end
 
-      {:error, reason, %{sent?: true, conn: conn}} ->
+      {:error, reason, %{sent?: true}} ->
         Logger.error("Upstream stream failed after response started: #{inspect(reason)}")
-        conn
+        abort_downstream!(reason)
     end
   end
 
@@ -566,11 +577,11 @@ defmodule ReverseIt.HTTPProxy do
 
       {:error, _mint_conn, :timeout, _responses} ->
         Logger.error("Timeout receiving response body")
-        acc.conn
+        abort_downstream!(:timeout)
 
       {:error, _mint_conn, reason, _responses} ->
         Logger.error("Mint stream error: #{inspect(reason)}")
-        acc.conn
+        abort_downstream!(reason)
     end
   end
 
@@ -614,15 +625,29 @@ defmodule ReverseIt.HTTPProxy do
     end
   end
 
-  defp finish_mint_stream_error(:response_body_too_large, acc) do
+  defp finish_mint_stream_error(:response_body_too_large, _acc) do
     Logger.error("Backend response exceeded max_response_body_size")
-    acc.conn
+    abort_downstream!(:response_body_too_large)
   end
 
-  defp finish_mint_stream_error(reason, acc) do
+  defp finish_mint_stream_error(reason, _acc) do
     Logger.error("Error streaming response body: #{inspect(reason)}")
-    acc.conn
+    abort_downstream!(reason)
   end
+
+  defp abort_downstream!(reason), do: exit({:upstream_stream_failed, reason})
+
+  defp retry_response_headers?(method, %Mint.TransportError{reason: reason}, retries_left)
+       when method in ["GET", "HEAD"] and retries_left > 0 and
+              reason in [:closed, :econnreset],
+       do: true
+
+  defp retry_response_headers?(method, reason, retries_left)
+       when method in ["GET", "HEAD"] and retries_left > 0 and
+              reason in [:closed, :econnreset],
+       do: true
+
+  defp retry_response_headers?(_method, _reason, _retries_left), do: false
 
   defp send_configured_bad_gateway(conn, config) do
     {status, body} = config.error_response

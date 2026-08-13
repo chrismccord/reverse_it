@@ -374,6 +374,112 @@ defmodule ReverseItTest do
       assert response.status == 200
       assert response.body == "Hello from backend!"
     end
+
+    test "does not complete a response when the upstream body is truncated" do
+      {:ok, listener} =
+        :gen_tcp.listen(0, [
+          :binary,
+          packet: :raw,
+          active: false,
+          reuseaddr: true,
+          ip: {127, 0, 0, 1}
+        ])
+
+      {:ok, upstream_port} = :inet.port(listener)
+      proxy_port = TestHelper.find_available_port()
+
+      on_exit(fn -> :gen_tcp.close(listener) end)
+
+      start_supervised!(
+        Supervisor.child_spec(
+          {Task,
+           fn ->
+             {:ok, socket} = :gen_tcp.accept(listener)
+             {:ok, _request} = recv_http_request(socket, "")
+
+             :ok =
+               :gen_tcp.send(
+                 socket,
+                 "HTTP/1.1 200 OK\r\ncontent-length: 12\r\nconnection: close\r\n\r\nshort"
+               )
+
+             :gen_tcp.close(socket)
+           end},
+          id: {:truncated_upstream, make_ref()}
+        )
+      )
+
+      start_supervised!(
+        Supervisor.child_spec(
+          {Bandit,
+           plug:
+             {ReverseIt, name: ReverseIt.TestFinch, backend: "http://127.0.0.1:#{upstream_port}"},
+           scheme: :http,
+           port: proxy_port,
+           thousand_island_options: [silent_terminate_on_error: true]},
+          id: {:truncated_proxy, make_ref()}
+        )
+      )
+
+      assert {:error, %Req.TransportError{reason: :closed}} =
+               Req.get("http://127.0.0.1:#{proxy_port}/object", retry: false)
+    end
+
+    test "retries a replay-safe request closed before response headers" do
+      {:ok, listener} =
+        :gen_tcp.listen(0, [
+          :binary,
+          packet: :raw,
+          active: false,
+          reuseaddr: true,
+          ip: {127, 0, 0, 1}
+        ])
+
+      {:ok, upstream_port} = :inet.port(listener)
+      proxy_port = TestHelper.find_available_port()
+      on_exit(fn -> :gen_tcp.close(listener) end)
+
+      start_supervised!(
+        Supervisor.child_spec(
+          {Task,
+           fn ->
+             {:ok, first} = :gen_tcp.accept(listener)
+             {:ok, _request} = recv_http_request(first, "")
+             :gen_tcp.close(first)
+
+             {:ok, second} = :gen_tcp.accept(listener)
+             {:ok, _request} = recv_http_request(second, "")
+
+             :ok =
+               :gen_tcp.send(
+                 second,
+                 "HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok"
+               )
+
+             :gen_tcp.close(second)
+           end},
+          id: {:retry_upstream, make_ref()}
+        )
+      )
+
+      start_supervised!(
+        Supervisor.child_spec(
+          {Bandit,
+           plug:
+             {ReverseIt,
+              name: ReverseIt.TestFinch,
+              backend: "http://127.0.0.1:#{upstream_port}",
+              response_header_retries: 1},
+           scheme: :http,
+           port: proxy_port,
+           thousand_island_options: [silent_terminate_on_error: true]},
+          id: {:retry_proxy, make_ref()}
+        )
+      )
+
+      assert %Req.Response{status: 200, body: "ok"} =
+               Req.get!("http://127.0.0.1:#{proxy_port}/object", retry: false)
+    end
   end
 
   defp recv_http_request(socket, acc) do

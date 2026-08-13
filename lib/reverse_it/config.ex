@@ -22,6 +22,7 @@ defmodule ReverseIt.Config do
     :connect_timeout,
     :pool_timeout,
     :response_header_timeout,
+    :response_header_retries,
     :upstream_idle_timeout,
     :request_body_read_timeout,
     :protocols,
@@ -63,6 +64,7 @@ defmodule ReverseIt.Config do
           connect_timeout: non_neg_integer(),
           pool_timeout: non_neg_integer(),
           response_header_timeout: non_neg_integer(),
+          response_header_retries: non_neg_integer(),
           upstream_idle_timeout: non_neg_integer(),
           request_body_read_timeout: non_neg_integer(),
           protocols: [:http1 | :http2],
@@ -105,6 +107,7 @@ defmodule ReverseIt.Config do
     * `:connect_timeout` - Connection timeout in milliseconds (default: 5_000)
     * `:pool_timeout` - Finch pool checkout timeout in milliseconds (default: 5_000)
     * `:response_header_timeout` - Time to wait for backend response headers (default: 30_000)
+    * `:response_header_retries` - Retries for replay-safe requests that fail before response headers (default: 0)
     * `:upstream_idle_timeout` - Rolling idle timeout for backend data (default: 55_000)
     * `:request_body_read_timeout` - Rolling timeout while reading client request bodies (default: 55_000)
     * `:protocols` - List of supported upstream HTTP protocols (default: [:http1])
@@ -256,6 +259,7 @@ defmodule ReverseIt.Config do
              connect_timeout: Keyword.get(opts, :connect_timeout, 5_000),
              pool_timeout: Keyword.get(opts, :pool_timeout, 5_000),
              response_header_timeout: Keyword.get(opts, :response_header_timeout, 30_000),
+             response_header_retries: Keyword.get(opts, :response_header_retries, 0),
              upstream_idle_timeout: Keyword.get(opts, :upstream_idle_timeout, 55_000),
              request_body_read_timeout: Keyword.get(opts, :request_body_read_timeout, 55_000),
              protocols: protocols,
@@ -435,6 +439,7 @@ defmodule ReverseIt.Config do
       {:connect_timeout, :non_negative_integer},
       {:pool_timeout, :non_negative_integer},
       {:response_header_timeout, :non_negative_integer},
+      {:response_header_retries, :non_negative_integer},
       {:upstream_idle_timeout, :non_negative_integer},
       {:request_body_read_timeout, :non_negative_integer},
       {:max_request_body_size, :non_negative_integer_or_infinity},
