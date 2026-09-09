@@ -240,6 +240,7 @@ defmodule ReverseIt do
     * `:pool_size` - Max connections per backend (default: 50)
     * `:pool_count` - Number of connection pools (default: 1)
     * `:connect_timeout` - Backend connection timeout in ms (default: 5_000)
+    * `:upstream_send_timeout` - Socket write timeout for pooled connections in ms (default: 55_000)
     * `:conn_max_idle_time` - Idle timeout for pooled backend HTTP/1 connections (default: 90_000)
     * `:protocols` - Upstream protocols for pooled Finch requests (default: [:http1])
   """
@@ -253,7 +254,11 @@ defmodule ReverseIt do
     verify_tls = Keyword.get(opts, :verify_tls, true)
 
     transport_opts =
-      [timeout: connect_timeout]
+      [
+        timeout: connect_timeout,
+        send_timeout: Keyword.get(opts, :upstream_send_timeout, 55_000),
+        send_timeout_close: true
+      ]
       |> maybe_disable_tls_verification(verify_tls)
 
     %{

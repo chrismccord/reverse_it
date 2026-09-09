@@ -24,6 +24,7 @@ defmodule ReverseIt.Config do
     :response_header_timeout,
     :response_header_retries,
     :upstream_idle_timeout,
+    :upstream_send_timeout,
     :request_body_read_timeout,
     :protocols,
     :verify_tls,
@@ -66,6 +67,7 @@ defmodule ReverseIt.Config do
           response_header_timeout: non_neg_integer(),
           response_header_retries: non_neg_integer(),
           upstream_idle_timeout: non_neg_integer(),
+          upstream_send_timeout: non_neg_integer(),
           request_body_read_timeout: non_neg_integer(),
           protocols: [:http1 | :http2],
           verify_tls: boolean(),
@@ -109,6 +111,7 @@ defmodule ReverseIt.Config do
     * `:response_header_timeout` - Time to wait for backend response headers (default: 30_000)
     * `:response_header_retries` - Retries for replay-safe requests that fail before response headers (default: 0)
     * `:upstream_idle_timeout` - Rolling idle timeout for backend data (default: 55_000)
+    * `:upstream_send_timeout` - Socket write timeout for direct HTTP/WebSocket connections (default: 55_000); configure on the supervisor child for pooled HTTP
     * `:request_body_read_timeout` - Rolling timeout while reading client request bodies (default: 55_000)
     * `:protocols` - List of supported upstream HTTP protocols (default: [:http1])
     * `:verify_tls` - Verify TLS certificates (default: true)
@@ -219,7 +222,11 @@ defmodule ReverseIt.Config do
   @spec transport_opts(t()) :: keyword()
   def transport_opts(%__MODULE__{} = config) do
     opts =
-      [timeout: config.connect_timeout]
+      [
+        timeout: config.connect_timeout,
+        send_timeout: config.upstream_send_timeout,
+        send_timeout_close: true
+      ]
       |> maybe_enable_ipv6(config.host)
 
     if config.scheme in [:https, :wss] and config.verify_tls == false do
@@ -261,6 +268,7 @@ defmodule ReverseIt.Config do
              response_header_timeout: Keyword.get(opts, :response_header_timeout, 30_000),
              response_header_retries: Keyword.get(opts, :response_header_retries, 0),
              upstream_idle_timeout: Keyword.get(opts, :upstream_idle_timeout, 55_000),
+             upstream_send_timeout: Keyword.get(opts, :upstream_send_timeout, 55_000),
              request_body_read_timeout: Keyword.get(opts, :request_body_read_timeout, 55_000),
              protocols: protocols,
              verify_tls: Keyword.get(opts, :verify_tls, true),
@@ -441,6 +449,7 @@ defmodule ReverseIt.Config do
       {:response_header_timeout, :non_negative_integer},
       {:response_header_retries, :non_negative_integer},
       {:upstream_idle_timeout, :non_negative_integer},
+      {:upstream_send_timeout, :non_negative_integer},
       {:request_body_read_timeout, :non_negative_integer},
       {:max_request_body_size, :non_negative_integer_or_infinity},
       {:request_body_buffer_size, :positive_integer},
