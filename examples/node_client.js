@@ -80,6 +80,13 @@ function httpPost(path, body) {
   });
 }
 
+function checkStatus(response, expected) {
+  log(`   Status: ${response.status}`, response.status === expected ? 'green' : 'red');
+  if (response.status !== expected) {
+    throw new Error(`Expected HTTP ${expected}, received ${response.status}`);
+  }
+}
+
 async function testHTTP() {
   log('\n=== Testing HTTP Proxy ===', 'cyan');
 
@@ -87,27 +94,27 @@ async function testHTTP() {
     // Test 1: Simple GET
     log('\n1. Testing simple GET /hello', 'yellow');
     const helloRes = await httpGet('/hello');
-    log(`   Status: ${helloRes.status}`, helloRes.status === 200 ? 'green' : 'red');
+    checkStatus(helloRes, 200);
     log(`   Body: ${helloRes.body}`);
 
     // Test 2: JSON API endpoint
     log('\n2. Testing JSON endpoint /api/status', 'yellow');
     const statusRes = await httpGet('/api/status');
-    log(`   Status: ${statusRes.status}`, statusRes.status === 200 ? 'green' : 'red');
+    checkStatus(statusRes, 200);
     const statusJson = JSON.parse(statusRes.body);
     log(`   Response: ${JSON.stringify(statusJson, null, 2)}`);
 
     // Test 3: POST with body
     log('\n3. Testing POST /echo with body', 'yellow');
     const echoRes = await httpPost('/echo', 'Hello from Node.js!');
-    log(`   Status: ${echoRes.status}`, echoRes.status === 200 ? 'green' : 'red');
+    checkStatus(echoRes, 200);
     const echoJson = JSON.parse(echoRes.body);
     log(`   Echo: ${echoJson.echo}`);
 
     // Test 4: Headers forwarding
     log('\n4. Testing header forwarding /headers', 'yellow');
     const headersRes = await httpGet('/headers');
-    log(`   Status: ${headersRes.status}`, headersRes.status === 200 ? 'green' : 'red');
+    checkStatus(headersRes, 200);
     const headersJson = JSON.parse(headersRes.body);
     log(`   X-Forwarded-For: ${headersJson.headers['x-forwarded-for'] || 'missing'}`);
     log(`   X-Forwarded-Proto: ${headersJson.headers['x-forwarded-proto'] || 'missing'}`);
@@ -116,7 +123,7 @@ async function testHTTP() {
     // Test 5: 404 handling
     log('\n5. Testing 404 /nonexistent', 'yellow');
     const notFoundRes = await httpGet('/nonexistent');
-    log(`   Status: ${notFoundRes.status}`, notFoundRes.status === 404 ? 'green' : 'red');
+    checkStatus(notFoundRes, 404);
 
     log('\n✅ HTTP tests completed', 'green');
 

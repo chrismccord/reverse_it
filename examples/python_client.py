@@ -34,6 +34,13 @@ def log(message, color=Colors.RESET):
     """Print colored log message"""
     print(f"{color}{message}{Colors.RESET}")
 
+def check_status(response, expected):
+    log(f"   Status: {response.status_code}",
+        Colors.GREEN if response.status_code == expected else Colors.RED)
+    if response.status_code != expected:
+        raise ValueError(f"Expected HTTP {expected}, received {response.status_code}")
+
+
 def test_http():
     """Test HTTP proxy functionality"""
     log("\n=== Testing HTTP Proxy ===", Colors.CYAN)
@@ -42,31 +49,27 @@ def test_http():
         # Test 1: Simple GET
         log("\n1. Testing simple GET /hello", Colors.YELLOW)
         response = requests.get(f"{PROXY_URL}/hello")
-        log(f"   Status: {response.status_code}",
-            Colors.GREEN if response.status_code == 200 else Colors.RED)
+        check_status(response, 200)
         log(f"   Body: {response.text}")
 
         # Test 2: JSON API endpoint
         log("\n2. Testing JSON endpoint /api/status", Colors.YELLOW)
         response = requests.get(f"{PROXY_URL}/api/status")
-        log(f"   Status: {response.status_code}",
-            Colors.GREEN if response.status_code == 200 else Colors.RED)
+        check_status(response, 200)
         data = response.json()
         log(f"   Response: {json.dumps(data, indent=2)}")
 
         # Test 3: POST with body
         log("\n3. Testing POST /echo with body", Colors.YELLOW)
         response = requests.post(f"{PROXY_URL}/echo", data="Hello from Python!")
-        log(f"   Status: {response.status_code}",
-            Colors.GREEN if response.status_code == 200 else Colors.RED)
+        check_status(response, 200)
         data = response.json()
         log(f"   Echo: {data['echo']}")
 
         # Test 4: Headers forwarding
         log("\n4. Testing header forwarding /headers", Colors.YELLOW)
         response = requests.get(f"{PROXY_URL}/headers")
-        log(f"   Status: {response.status_code}",
-            Colors.GREEN if response.status_code == 200 else Colors.RED)
+        check_status(response, 200)
         data = response.json()
         headers = data.get('headers', {})
         log(f"   X-Forwarded-For: {headers.get('x-forwarded-for', 'missing')}")
@@ -76,8 +79,7 @@ def test_http():
         # Test 5: 404 handling
         log("\n5. Testing 404 /nonexistent", Colors.YELLOW)
         response = requests.get(f"{PROXY_URL}/nonexistent")
-        log(f"   Status: {response.status_code}",
-            Colors.GREEN if response.status_code == 404 else Colors.RED)
+        check_status(response, 404)
 
         log("\n✅ HTTP tests completed", Colors.GREEN)
         return True
