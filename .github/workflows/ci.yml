@@ -74,4 +74,4 @@ jobs:
         env:
           MIX_ENV: prod
           MIX_INSTALL_DIR: ${{ runner.temp }}/reverse-it-cowboy
-        run: elixir test/cowboy_warning.exs
+        run: elixir examples/cowboy_warning.exs

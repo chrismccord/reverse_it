@@ -1,4 +1,4 @@
-# Run with `MIX_ENV=prod elixir test/cowboy_warning.exs`.
+# Run with `MIX_ENV=prod elixir examples/cowboy_warning.exs`.
 # Keep Cowboy isolated from the library's dependencies and normal test application.
 Mix.install(
   [
