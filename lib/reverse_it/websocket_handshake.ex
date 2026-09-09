@@ -160,7 +160,8 @@ defmodule ReverseIt.WebSocketHandshake do
         conn: conn,
         websocket: websocket,
         request_ref: request_ref,
-        client: client
+        client: client,
+        initial_backend_data: response.body |> Enum.reverse() |> IO.iodata_to_binary()
       }
 
       {:ok, state, client_response_headers(response_headers)}

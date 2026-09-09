@@ -16,6 +16,7 @@ defmodule ReverseIt.WebSocketProxy do
     :request_ref,
     :client,
     :backend_upgrade_timer,
+    initial_backend_data: <<>>,
     pending_frames: [],
     pending_bytes: 0
   ]
@@ -27,6 +28,7 @@ defmodule ReverseIt.WebSocketProxy do
           request_ref: Mint.Types.request_ref(),
           client: map(),
           backend_upgrade_timer: reference() | nil,
+          initial_backend_data: binary(),
           pending_frames: [Mint.WebSocket.frame()],
           pending_bytes: non_neg_integer()
         }
@@ -39,7 +41,12 @@ defmodule ReverseIt.WebSocketProxy do
   - client_headers: Original client headers for forwarding
   """
   @impl WebSock
-  def init(%__MODULE__{} = state), do: {:ok, state}
+  def init(%__MODULE__{initial_backend_data: <<>>} = state), do: {:ok, state}
+
+  def init(%__MODULE__{} = state) do
+    responses = [{:data, state.request_ref, state.initial_backend_data}]
+    process_backend_responses(responses, %{state | initial_backend_data: <<>>})
+  end
 
   def init(opts) do
     config = Keyword.fetch!(opts, :config)
