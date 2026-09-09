@@ -68,11 +68,7 @@ defmodule ReverseItTest do
     end
 
     test "Unix sockets require one-shot HTTP/1 upstreams" do
-      path =
-        Path.join(
-          System.tmp_dir!(),
-          "reverse-it-config-#{System.unique_integer([:positive])}.sock"
-        )
+      path = TestHelper.unix_socket_path()
 
       assert {:error, "unix_socket requires upstream_connection: :one_shot"} =
                ReverseIt.Config.parse(
@@ -152,7 +148,7 @@ defmodule ReverseItTest do
     end
 
     test "opens a fresh Unix-socket upstream for every request" do
-      path = Path.join(System.tmp_dir!(), "reverse-it-#{System.unique_integer([:positive])}.sock")
+      path = TestHelper.unix_socket_path()
       File.rm(path)
 
       {:ok, listener} =
@@ -215,11 +211,7 @@ defmodule ReverseItTest do
     end
 
     test "preserves bodyless response semantics over a Unix socket" do
-      path =
-        Path.join(
-          System.tmp_dir!(),
-          "reverse-it-empty-#{System.unique_integer([:positive])}.sock"
-        )
+      path = TestHelper.unix_socket_path()
 
       File.rm(path)
 
@@ -571,10 +563,23 @@ defmodule ReverseItTest do
 
     @tag :streaming
     test "reuses a pooled upstream connection for streaming request bodies" do
-      body = :binary.copy("A", 2 * 1024 * 1024)
+      # Isolate the pool and limit it to one connection: a shared multi-connection
+      # pool may legitimately hand out different connections to these requests.
+      start_supervised!({ReverseIt, name: ReverseIt.StreamingReuseFinch, pool_size: 1})
+      port = TestHelper.find_available_port()
 
-      first = Req.post!("#{proxy_url()}/upload-peer", body: body, retry: false)
-      second = Req.post!("#{proxy_url()}/upload-peer", body: body, retry: false)
+      start_supervised!(
+        {Bandit,
+         plug: {ReverseIt, name: ReverseIt.StreamingReuseFinch, backend: backend_url()},
+         scheme: :http,
+         port: port}
+      )
+
+      body = :binary.copy("A", 2 * 1024 * 1024)
+      url = "http://localhost:#{port}/upload-peer"
+
+      first = Req.post!(url, body: body, retry: false)
+      second = Req.post!(url, body: body, retry: false)
 
       assert first.body["received_bytes"] == byte_size(body)
       assert second.body["received_bytes"] == byte_size(body)
@@ -684,8 +689,7 @@ defmodule ReverseItTest do
 
     @tag :websocket
     test "proxies WebSocket messages through a Unix socket" do
-      path =
-        Path.join(System.tmp_dir!(), "reverse-it-ws-#{System.unique_integer([:positive])}.sock")
+      path = TestHelper.unix_socket_path()
 
       proxy_port = TestHelper.find_available_port()
       File.rm(path)
