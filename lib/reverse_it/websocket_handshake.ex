@@ -165,6 +165,10 @@ defmodule ReverseIt.WebSocketHandshake do
 
       {:ok, state, client_response_headers(response_headers)}
     else
+      {:error, conn, reason} ->
+        Mint.HTTP.close(conn)
+        {:error, reason}
+
       {:error, reason} ->
         Mint.HTTP.close(conn)
         {:error, reason}
