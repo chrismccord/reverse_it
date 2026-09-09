@@ -131,10 +131,12 @@ defmodule ReverseIt.WebSocketHandshake do
         finish_switching_protocols(conn, request_ref, response, config, client)
 
       status when is_integer(status) ->
-        headers = client_response_headers(response.headers || [], config)
-        body = response.body |> Enum.reverse() |> IO.iodata_to_binary()
         Mint.HTTP.close(conn)
-        {:reject, status, headers, body}
+
+        with {:ok, headers} <- Headers.response_headers(response.headers || [], config) do
+          body = response.body |> Enum.reverse() |> IO.iodata_to_binary()
+          {:reject, status, client_response_headers(headers), body}
+        end
 
       _missing ->
         Mint.HTTP.close(conn)
@@ -195,13 +197,6 @@ defmodule ReverseIt.WebSocketHandshake do
     Enum.reject(headers, fn {name, _value} ->
       MapSet.member?(@client_managed_headers, String.downcase(name))
     end)
-  end
-
-  defp client_response_headers(headers, config) do
-    case Headers.response_headers(headers, config) do
-      {:ok, headers} -> client_response_headers(headers)
-      {:error, _reason} -> []
-    end
   end
 
   defp header_tokens(headers, name) do
