@@ -131,7 +131,8 @@ function testWebSocket() {
     log('\n=== Testing WebSocket Proxy ===', 'cyan');
 
     const ws = new WebSocket('ws://localhost:4000/ws');
-    let testsPassed = 0;
+    const testsPassed = new Set();
+    const rapidMessages = new Set();
     const testsTotal = 5;
     let settled = false;
 
@@ -145,7 +146,7 @@ function testWebSocket() {
 
     // Bound both connection establishment and frame exchange.
     const timeout = setTimeout(() => {
-      finish(new Error(`WebSocket test timed out (${testsPassed}/${testsTotal} passed)`));
+      finish(new Error(`WebSocket test timed out (${testsPassed.size}/${testsTotal} passed)`));
       ws.terminate();
     }, 5000);
 
@@ -157,12 +158,13 @@ function testWebSocket() {
       ws.send('Hello from Node.js!');
     });
 
-    ws.on('message', (data) => {
+    ws.on('message', (data, isBinary) => {
+      if (isBinary) return;
       const message = data.toString();
 
       if (message === 'Backend echo: Hello from Node.js!') {
         log('   ✓ Received: ' + message, 'green');
-        testsPassed++;
+        testsPassed.add('text');
 
         // Test 2: Empty text frame
         log('\n2. Testing empty text frame', 'yellow');
@@ -170,16 +172,16 @@ function testWebSocket() {
 
       } else if (message === 'Backend echo: ') {
         log('   ✓ Received empty echo', 'green');
-        testsPassed++;
+        testsPassed.add('empty');
 
         // Test 3: Large message
         log('\n3. Testing large message (10KB)', 'yellow');
         const largeMsg = 'A'.repeat(10000);
         ws.send(largeMsg);
 
-      } else if (message.startsWith('Backend echo: AAAA')) {
+      } else if (message === `Backend echo: ${'A'.repeat(10000)}`) {
         log(`   ✓ Received large message (${message.length} bytes)`, 'green');
-        testsPassed++;
+        testsPassed.add('large');
 
         // Test 4: Rapid messages
         log('\n4. Testing rapid successive messages', 'yellow');
@@ -187,15 +189,15 @@ function testWebSocket() {
           ws.send(`Rapid message ${i}`);
         }
 
-      } else if (message.match(/Backend echo: Rapid message \d/)) {
-        // Count rapid messages
-        const rapidNum = parseInt(message.match(/\d/)[0]);
+      } else if (message.match(/^Backend echo: Rapid message [1-5]$/)) {
+        const rapidNum = Number(message.at(-1));
+        rapidMessages.add(rapidNum);
         if (rapidNum === 1) {
           log('   ✓ Receiving rapid messages...', 'green');
         }
-        if (rapidNum === 5) {
+        if (rapidMessages.size === 5 && !testsPassed.has('rapid')) {
           log('   ✓ All 5 rapid messages received', 'green');
-          testsPassed++;
+          testsPassed.add('rapid');
 
           // Test 5: Binary frame
           log('\n5. Testing binary frame', 'yellow');
@@ -214,21 +216,21 @@ function testWebSocket() {
       if (settled) return;
       log('\n✓ WebSocket connection closed', 'green');
 
-      if (testsPassed >= testsTotal - 1) { // Allow binary test to be async
-        log(`\n✅ WebSocket tests completed (${testsPassed}/${testsTotal} passed)`, 'green');
+      if (testsPassed.size === testsTotal) {
+        log(`\n✅ WebSocket tests completed (${testsPassed.size}/${testsTotal} passed)`, 'green');
         finish();
       } else {
-        finish(new Error(`Only ${testsPassed}/${testsTotal} tests passed`));
+        finish(new Error(`Only ${testsPassed.size}/${testsTotal} tests passed`));
       }
     });
 
     // Handle binary messages
-    ws.on('message', (data) => {
-      if (Buffer.isBuffer(data) && data.length === 5) {
+    ws.on('message', (data, isBinary) => {
+      if (isBinary && Buffer.isBuffer(data) && data.length === 5) {
         const expected = Buffer.from([1, 2, 3, 4, 5]);
         if (data.equals(expected)) {
           log('   ✓ Received binary frame: ' + Array.from(data).join(', '), 'green');
-          testsPassed++;
+          testsPassed.add('binary');
 
           // All tests done, close connection
           log('\n6. Closing connection', 'yellow');

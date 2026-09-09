@@ -79,3 +79,7 @@ jobs:
       - name: Check Node example regressions
         if: matrix.quality
         run: node --test examples/node*_test.js
+
+      - name: Check Python example regressions
+        if: matrix.quality
+        run: python3 -m unittest discover -s examples -p 'python*_test.py'

@@ -63,11 +63,11 @@ test('successful completion cancels the deadline', { timeout: 1000 }, async () =
     'Backend echo: Hello from Node.js!',
     'Backend echo: ',
     `Backend echo: ${'A'.repeat(10000)}`,
-    'Backend echo: Rapid message 5',
-    Buffer.from([1, 2, 3, 4, 5]),
+    ...Array.from({ length: 5 }, (_, i) => `Backend echo: Rapid message ${i + 1}`),
   ]) {
-    socket.emit('message', Buffer.from(message));
+    socket.emit('message', Buffer.from(message), false);
   }
+  socket.emit('message', Buffer.from([1, 2, 3, 4, 5]), true);
   await result;
   assert.equal(timers.size, 0);
   assert.equal(socket.terminated, false);
