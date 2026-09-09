@@ -998,29 +998,50 @@ defmodule ReverseItTest do
       {:ok, conn, ref} = Mint.WebSocket.upgrade(:ws, conn, "/tiny-ws/ws", [])
       {:ok, conn, websocket} = wait_for_ws_upgrade(conn, ref, 5000)
 
-      {:ok, _websocket, data} =
+      {:ok, websocket, data} =
         Mint.WebSocket.encode(websocket, {:text, String.duplicate("A", 256)})
 
       {:ok, conn} = Mint.WebSocket.stream_request_body(conn, ref, data)
+      deadline = System.monotonic_time(:millisecond) + 2_000
 
-      assert_receive message, 2000
-
-      case Mint.WebSocket.stream(conn, message) do
-        {:ok, _conn, responses} ->
-          assert Enum.any?(responses, fn
-                   {:data, ^ref, _data} -> true
-                   {:done, ^ref} -> true
-                   _other -> false
-                 end)
-
-        {:error, _conn, _reason, _responses} ->
-          assert true
-
-        :unknown ->
-          assert match?({:tcp_closed, _socket}, message)
+      try do
+        assert_ws_size_limit_close(conn, websocket, ref, deadline)
+      after
+        Mint.HTTP.close(conn)
       end
+    end
+  end
 
-      Mint.HTTP.close(conn)
+  defp assert_ws_size_limit_close(conn, websocket, ref, deadline) do
+    socket = Mint.HTTP.get_socket(conn)
+    timeout = max(deadline - System.monotonic_time(:millisecond), 0)
+
+    receive do
+      {:tcp, ^socket, _data} = message ->
+        assert {:ok, conn, responses} = Mint.WebSocket.stream(conn, message)
+
+        {websocket, frames} =
+          Enum.reduce(responses, {websocket, []}, fn
+            {:data, ^ref, data}, {websocket, frames} ->
+              assert {:ok, websocket, decoded} = Mint.WebSocket.decode(websocket, data)
+              {websocket, frames ++ decoded}
+
+            _response, acc ->
+              acc
+          end)
+
+        case frames do
+          [] -> assert_ws_size_limit_close(conn, websocket, ref, deadline)
+          frames -> assert [{:close, 1009, _reason}] = frames
+        end
+
+      {:tcp_closed, ^socket} ->
+        flunk("WebSocket closed without a 1009 close frame")
+
+      {:tcp_error, ^socket, reason} ->
+        flunk("WebSocket transport failed instead of sending a 1009 close: #{inspect(reason)}")
+    after
+      timeout -> flunk("Timed out waiting for a 1009 close frame")
     end
   end
 
