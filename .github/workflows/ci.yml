@@ -68,3 +68,7 @@ jobs:
 
       - name: Test with warnings as errors
         run: mix test --warnings-as-errors
+
+      - name: Check Node example regressions
+        if: matrix.quality
+        run: node --test examples/node*_test.js

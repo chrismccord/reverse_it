@@ -133,6 +133,21 @@ function testWebSocket() {
     const ws = new WebSocket('ws://localhost:4000/ws');
     let testsPassed = 0;
     const testsTotal = 5;
+    let settled = false;
+
+    function finish(error) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      if (error) reject(error);
+      else resolve();
+    }
+
+    // Bound both connection establishment and frame exchange.
+    const timeout = setTimeout(() => {
+      finish(new Error(`WebSocket test timed out (${testsPassed}/${testsTotal} passed)`));
+      ws.terminate();
+    }, 5000);
 
     ws.on('open', () => {
       log('\n✓ WebSocket connection established', 'green');
@@ -192,17 +207,18 @@ function testWebSocket() {
 
     ws.on('error', (error) => {
       log(`\n❌ WebSocket error: ${error.message}`, 'red');
-      reject(error);
+      finish(error);
     });
 
     ws.on('close', () => {
+      if (settled) return;
       log('\n✓ WebSocket connection closed', 'green');
 
       if (testsPassed >= testsTotal - 1) { // Allow binary test to be async
         log(`\n✅ WebSocket tests completed (${testsPassed}/${testsTotal} passed)`, 'green');
-        resolve();
+        finish();
       } else {
-        reject(new Error(`Only ${testsPassed}/${testsTotal} tests passed`));
+        finish(new Error(`Only ${testsPassed}/${testsTotal} tests passed`));
       }
     });
 
@@ -220,15 +236,6 @@ function testWebSocket() {
         }
       }
     });
-
-    // Timeout after 5 seconds
-    setTimeout(() => {
-      if (ws.readyState === WebSocket.OPEN) {
-        log('\n⚠ Test timeout, closing connection', 'yellow');
-        ws.close();
-        resolve(); // Don't fail on timeout, just complete
-      }
-    }, 5000);
   });
 }
 
