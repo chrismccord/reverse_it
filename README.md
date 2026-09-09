@@ -221,6 +221,25 @@ mix test --only websocket
 
 **Note:** Test servers are only started during `mix test` and are not included in the library when used as a dependency.
 
+### Continuous Integration
+
+GitHub Actions runs on pushes, pull requests, manual dispatch, and a weekly schedule.
+The test matrix covers Elixir 1.18 on OTP 25 and 27, Elixir 1.19 on OTP 28,
+Elixir 1.20 on OTP 27, and the latest stable Elixir/OTP pair. Minor-version lanes
+use their newest patches; the latest-stable lane excludes release candidates.
+
+Every lane treats project compilation and test compilation warnings as errors.
+Formatting is checked only on the latest stable Elixir to avoid conflicting
+formatter output between versions. To run the same checks locally:
+
+```bash
+export MIX_ENV=test
+mix deps.get --check-locked
+mix format --check-formatted
+mix compile --warnings-as-errors
+mix test --warnings-as-errors
+```
+
 ### Interactive Testing
 
 For manual/interactive testing, the example clients can be used while tests are running:

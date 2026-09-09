@@ -6,8 +6,6 @@ defmodule ReverseIt.TestProxy do
 
   use Plug.Router
 
-  require Logger
-
   plug(:match)
   plug(:proxy)
   plug(:dispatch)

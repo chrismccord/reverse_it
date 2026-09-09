@@ -2,6 +2,13 @@ ExUnit.start()
 
 # Wait for test servers to be ready before running tests
 defmodule TestHelper do
+  def unix_socket_path do
+    # Relative paths stay within Unix socket length limits even in deep checkouts
+    # or when the OS supplies a long temporary directory (notably on macOS).
+    File.mkdir_p!("tmp")
+    Path.join("tmp", "reverse-it-#{System.pid()}-#{System.unique_integer([:positive])}.sock")
+  end
+
   def wait_for_server(url, retries \\ 100) do
     # Use Req with disabled retries for faster polling
     case Req.get(url, retry: false, connect_options: [timeout: 100]) do
