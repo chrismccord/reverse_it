@@ -26,12 +26,10 @@ defmodule TestHelper do
   end
 
   @doc """
-  Finds an available port by opening a socket on port 0, which assigns a random available port.
+  Returns the TCP port already bound by a running Bandit listener.
   """
-  def find_available_port do
-    {:ok, socket} = :gen_tcp.listen(0, [:binary, active: false, reuseaddr: true])
-    {:ok, port} = :inet.port(socket)
-    :gen_tcp.close(socket)
+  def listener_port(pid) do
+    {:ok, {_, port}} = ThousandIsland.listener_info(pid)
     port
   end
 end
@@ -39,18 +37,8 @@ end
 # Ensure application is started (but no test servers yet)
 {:ok, _} = Application.ensure_all_started(:reverse_it)
 
-# Find available ports
-backend_port = TestHelper.find_available_port()
-proxy_port = TestHelper.find_available_port()
-
-# Store ports in application environment so tests can access them
-Application.put_env(:reverse_it, :test_backend_port, backend_port)
-Application.put_env(:reverse_it, :test_proxy_port, proxy_port)
-
 # Explicitly start test servers under the supervisor
 IO.puts("Starting test servers...")
-IO.puts("Backend port: #{backend_port}")
-IO.puts("Proxy port: #{proxy_port}")
 
 # Start ReverseIt Finch pool
 {:ok, _finch_pid} =
@@ -60,26 +48,32 @@ IO.puts("Proxy port: #{proxy_port}")
   )
 
 # Start backend server on dynamically allocated port
-{:ok, _backend_pid} =
+{:ok, backend_pid} =
   Supervisor.start_child(
     ReverseIt.Supervisor,
     {Bandit,
      plug: ReverseIt.TestBackend,
      scheme: :http,
-     port: backend_port,
+     port: 0,
      thousand_island_options: [silent_terminate_on_error: true]}
   )
 
+backend_port = TestHelper.listener_port(backend_pid)
+Application.put_env(:reverse_it, :test_backend_port, backend_port)
+
 # Start proxy server on dynamically allocated port
-{:ok, _proxy_pid} =
+{:ok, proxy_pid} =
   Supervisor.start_child(
     ReverseIt.Supervisor,
     {Bandit,
      plug: ReverseIt.TestProxy,
      scheme: :http,
-     port: proxy_port,
+     port: 0,
      thousand_island_options: [silent_terminate_on_error: true]}
   )
+
+proxy_port = TestHelper.listener_port(proxy_pid)
+Application.put_env(:reverse_it, :test_proxy_port, proxy_port)
 
 # Wait for both servers to be ready
 IO.puts("Waiting for test servers to start...")

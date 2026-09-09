@@ -378,7 +378,6 @@ defmodule ReverseItTest do
         ])
 
       {:ok, upstream_port} = :inet.port(listener)
-      proxy_port = TestHelper.find_available_port()
 
       on_exit(fn -> :gen_tcp.close(listener) end)
 
@@ -401,17 +400,20 @@ defmodule ReverseItTest do
         )
       )
 
-      start_supervised!(
-        Supervisor.child_spec(
-          {Bandit,
-           plug:
-             {ReverseIt, name: ReverseIt.TestFinch, backend: "http://127.0.0.1:#{upstream_port}"},
-           scheme: :http,
-           port: proxy_port,
-           thousand_island_options: [silent_terminate_on_error: true]},
-          id: {:truncated_proxy, make_ref()}
+      proxy_port =
+        start_supervised!(
+          Supervisor.child_spec(
+            {Bandit,
+             plug:
+               {ReverseIt,
+                name: ReverseIt.TestFinch, backend: "http://127.0.0.1:#{upstream_port}"},
+             scheme: :http,
+             port: 0,
+             thousand_island_options: [silent_terminate_on_error: true]},
+            id: {:truncated_proxy, make_ref()}
+          )
         )
-      )
+        |> TestHelper.listener_port()
 
       assert {:error, %{reason: :closed}} =
                Req.get("http://127.0.0.1:#{proxy_port}/object", retry: false)
@@ -428,7 +430,6 @@ defmodule ReverseItTest do
         ])
 
       {:ok, upstream_port} = :inet.port(listener)
-      proxy_port = TestHelper.find_available_port()
       on_exit(fn -> :gen_tcp.close(listener) end)
 
       start_supervised!(
@@ -454,20 +455,22 @@ defmodule ReverseItTest do
         )
       )
 
-      start_supervised!(
-        Supervisor.child_spec(
-          {Bandit,
-           plug:
-             {ReverseIt,
-              name: ReverseIt.TestFinch,
-              backend: "http://127.0.0.1:#{upstream_port}",
-              response_header_retries: 1},
-           scheme: :http,
-           port: proxy_port,
-           thousand_island_options: [silent_terminate_on_error: true]},
-          id: {:retry_proxy, make_ref()}
+      proxy_port =
+        start_supervised!(
+          Supervisor.child_spec(
+            {Bandit,
+             plug:
+               {ReverseIt,
+                name: ReverseIt.TestFinch,
+                backend: "http://127.0.0.1:#{upstream_port}",
+                response_header_retries: 1},
+             scheme: :http,
+             port: 0,
+             thousand_island_options: [silent_terminate_on_error: true]},
+            id: {:retry_proxy, make_ref()}
+          )
         )
-      )
+        |> TestHelper.listener_port()
 
       assert %Req.Response{status: 200, body: "ok"} =
                Req.get!("http://127.0.0.1:#{proxy_port}/object", retry: false)
@@ -566,14 +569,15 @@ defmodule ReverseItTest do
       # Isolate the pool and limit it to one connection: a shared multi-connection
       # pool may legitimately hand out different connections to these requests.
       start_supervised!({ReverseIt, name: ReverseIt.StreamingReuseFinch, pool_size: 1})
-      port = TestHelper.find_available_port()
 
-      start_supervised!(
-        {Bandit,
-         plug: {ReverseIt, name: ReverseIt.StreamingReuseFinch, backend: backend_url()},
-         scheme: :http,
-         port: port}
-      )
+      port =
+        start_supervised!(
+          {Bandit,
+           plug: {ReverseIt, name: ReverseIt.StreamingReuseFinch, backend: backend_url()},
+           scheme: :http,
+           port: 0}
+        )
+        |> TestHelper.listener_port()
 
       body = :binary.copy("A", 2 * 1024 * 1024)
       url = "http://localhost:#{port}/upload-peer"
@@ -691,7 +695,6 @@ defmodule ReverseItTest do
     test "proxies WebSocket messages through a Unix socket" do
       path = TestHelper.unix_socket_path()
 
-      proxy_port = TestHelper.find_available_port()
       File.rm(path)
 
       start_supervised!(
@@ -706,22 +709,24 @@ defmodule ReverseItTest do
         )
       )
 
-      start_supervised!(
-        Supervisor.child_spec(
-          {Bandit,
-           plug:
-             {ReverseIt.TestUnixProxy,
-              name: ReverseIt.TestFinch,
-              backend: "ws://provider-tunnel",
-              unix_socket: path,
-              upstream_connection: :one_shot,
-              protocols: [:http1]},
-           scheme: :http,
-           port: proxy_port,
-           thousand_island_options: [silent_terminate_on_error: true]},
-          id: {:unix_websocket_proxy, make_ref()}
+      proxy_port =
+        start_supervised!(
+          Supervisor.child_spec(
+            {Bandit,
+             plug:
+               {ReverseIt.TestUnixProxy,
+                name: ReverseIt.TestFinch,
+                backend: "ws://provider-tunnel",
+                unix_socket: path,
+                upstream_connection: :one_shot,
+                protocols: [:http1]},
+             scheme: :http,
+             port: 0,
+             thousand_island_options: [silent_terminate_on_error: true]},
+            id: {:unix_websocket_proxy, make_ref()}
+          )
         )
-      )
+        |> TestHelper.listener_port()
 
       on_exit(fn -> File.rm(path) end)
 
