@@ -168,6 +168,9 @@ defmodule ReverseIt.Headers do
 
   defp add_forwarded_headers(headers, %{forwarded_headers: :replace}, client) do
     headers
+    |> Enum.reject(fn {name, _value} ->
+      name in ["x-forwarded-for", "x-forwarded-proto", "x-forwarded-host"]
+    end)
     |> List.keystore("x-forwarded-for", 0, {"x-forwarded-for", client.remote_ip})
     |> List.keystore("x-forwarded-proto", 0, {"x-forwarded-proto", client.scheme})
     |> maybe_add_forwarded_host(client.host)
