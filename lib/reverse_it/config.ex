@@ -42,6 +42,7 @@ defmodule ReverseIt.Config do
     :max_request_headers,
     :websocket_idle_timeout,
     :websocket_backend_upgrade_timeout,
+    :max_websocket_upgrade_response_body_size,
     :max_websocket_frame_size,
     :max_websocket_pending_bytes,
     :max_websocket_pending_frames,
@@ -84,6 +85,7 @@ defmodule ReverseIt.Config do
           max_request_headers: pos_integer(),
           websocket_idle_timeout: non_neg_integer(),
           websocket_backend_upgrade_timeout: non_neg_integer(),
+          max_websocket_upgrade_response_body_size: non_neg_integer(),
           max_websocket_frame_size: pos_integer(),
           max_websocket_pending_bytes: non_neg_integer(),
           max_websocket_pending_frames: non_neg_integer(),
@@ -126,6 +128,7 @@ defmodule ReverseIt.Config do
     * `:max_request_headers` - Maximum number of request headers (default: 100)
     * `:websocket_idle_timeout` - WebSocket client idle timeout (default: 55_000)
     * `:websocket_backend_upgrade_timeout` - Backend WebSocket upgrade timeout (default: 5_000)
+    * `:max_websocket_upgrade_response_body_size` - Buffered upgrade rejection body limit (default: 64KB); a smaller `:max_response_body_size` also applies
     * `:max_websocket_frame_size` - Maximum client/backend WebSocket message size (default: 16MB)
     * `:max_websocket_pending_bytes` - Maximum frames buffered before backend upgrade (default: 1MB)
     * `:max_websocket_pending_frames` - Maximum frame count buffered before backend upgrade (default: 16)
@@ -286,6 +289,8 @@ defmodule ReverseIt.Config do
              websocket_idle_timeout: Keyword.get(opts, :websocket_idle_timeout, 55_000),
              websocket_backend_upgrade_timeout:
                Keyword.get(opts, :websocket_backend_upgrade_timeout, 5_000),
+             max_websocket_upgrade_response_body_size:
+               Keyword.get(opts, :max_websocket_upgrade_response_body_size, 65_536),
              max_websocket_frame_size:
                Keyword.get(opts, :max_websocket_frame_size, @default_max_websocket_frame_size),
              max_websocket_pending_bytes:
@@ -453,6 +458,7 @@ defmodule ReverseIt.Config do
       {:max_request_headers, :positive_integer},
       {:websocket_idle_timeout, :non_negative_integer},
       {:websocket_backend_upgrade_timeout, :non_negative_integer},
+      {:max_websocket_upgrade_response_body_size, :non_negative_integer},
       {:max_websocket_frame_size, :positive_integer},
       {:max_websocket_pending_bytes, :non_negative_integer},
       {:max_websocket_pending_frames, :non_negative_integer}

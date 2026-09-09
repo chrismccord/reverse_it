@@ -83,7 +83,7 @@ defmodule ReverseIt.WebSocketHandshake do
         {:cont, {:ok, %{response | headers: headers}}}
 
       {:data, ^request_ref, data}, {:ok, response} ->
-        case append_body(response, data, config.max_response_body_size) do
+        case append_body(response, data, response_body_limit(response, config)) do
           {:ok, response} -> {:cont, {:ok, response}}
           {:error, reason} -> {:halt, {:error, reason, response}}
         end
@@ -105,6 +105,15 @@ defmodule ReverseIt.WebSocketHandshake do
       {:error, _reason, response} -> response
     end
   end
+
+  # Bytes after a 101 belong to the WebSocket, not to an HTTP rejection body.
+  defp response_body_limit(%{status: 101}, config), do: config.max_response_body_size
+
+  defp response_body_limit(_response, %{max_response_body_size: :infinity} = config),
+    do: config.max_websocket_upgrade_response_body_size
+
+  defp response_body_limit(_response, config),
+    do: min(config.max_response_body_size, config.max_websocket_upgrade_response_body_size)
 
   defp append_body(response, data, :infinity) do
     {:ok,

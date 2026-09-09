@@ -187,6 +187,7 @@ end
 - `:protocols` - List of supported upstream protocols (default: `[:http1]`)
 - `:websocket_idle_timeout` - WebSocket idle timeout in milliseconds (default: 55,000)
 - `:websocket_backend_upgrade_timeout` - Backend WebSocket upgrade timeout (default: 5,000)
+- `:max_websocket_upgrade_response_body_size` - Maximum buffered backend upgrade rejection body (default: 65,536 / 64KB). Must be a finite non-negative integer; a smaller `:max_response_body_size` also applies. Oversized rejections use `:error_response` instead of buffering indefinitely.
 - `:max_websocket_frame_size` - Maximum WebSocket frame/message size (default: 16,777,216 / 16MB)
 - `:max_websocket_pending_bytes` - Maximum bytes buffered before backend upgrade completes (default: 1,048,576 / 1MB)
 - `:max_websocket_pending_frames` - Maximum frame count buffered before backend upgrade completes (default: 16)
