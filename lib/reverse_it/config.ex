@@ -210,7 +210,7 @@ defmodule ReverseIt.Config do
   Returns the WebSocket scheme to use for a backend upgrade.
   """
   @spec websocket_scheme(t()) :: :ws | :wss
-  def websocket_scheme(%__MODULE__{scheme: :wss}), do: :wss
+  def websocket_scheme(%__MODULE__{scheme: scheme}) when scheme in [:https, :wss], do: :wss
   def websocket_scheme(%__MODULE__{}), do: :ws
 
   @doc """
