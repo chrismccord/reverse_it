@@ -329,7 +329,7 @@ defmodule ReverseIt.HTTPProxy do
         _ -> "http"
       end
 
-    url = "#{scheme}://#{config.host}:#{config.port}#{target_path}"
+    url = "#{scheme}://#{Headers.backend_host(config)}#{target_path}"
 
     if query_string && query_string != "" do
       url <> "?" <> query_string

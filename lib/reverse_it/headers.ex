@@ -115,7 +115,9 @@ defmodule ReverseIt.Headers do
   end
 
   def backend_host(config) do
-    if config.port in [80, 443], do: config.host, else: "#{config.host}:#{config.port}"
+    host = if String.contains?(config.host, ":"), do: "[#{config.host}]", else: config.host
+    default_port = if config.scheme in [:https, :wss], do: 443, else: 80
+    if config.port == default_port, do: host, else: "#{host}:#{config.port}"
   end
 
   defp normalize_headers(headers) do

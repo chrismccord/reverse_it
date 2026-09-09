@@ -160,6 +160,7 @@ end
 - `:connect_timeout` - Backend connection timeout in ms (default: 5,000)
 - `:conn_max_idle_time` - Idle timeout for pooled backend HTTP/1 connections (default: 90,000)
 - `:protocols` - Upstream protocols for pooled Finch requests (default: `[:http1]`)
+- `:inet6` - Try IPv6 before IPv4 for pooled connections (default: `false`). Enable for IPv6 backends, e.g. `backend: "http://[::1]:4000"`. Direct one-shot and WebSocket connections detect IPv6 literals automatically.
 
 ### Plug Options (when using as a Plug)
 
