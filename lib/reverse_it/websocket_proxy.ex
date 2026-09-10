@@ -340,39 +340,29 @@ defmodule ReverseIt.WebSocketProxy do
 
   defp forward_frames_to_client([frame | rest], remaining_responses, state) do
     case frame do
-      {:text, data} ->
+      {opcode, _data} when opcode in [:text, :binary, :ping, :pong] ->
         case forward_frames_to_client(rest, remaining_responses, state) do
-          {:ok, state} -> {:push, [{:text, data}], state}
-          {:push, frames, state} -> {:push, [{:text, data} | frames], state}
-          other -> other
+          {:ok, state} ->
+            {:push, [frame], state}
+
+          {:push, frames, state} ->
+            {:push, [frame | frames], state}
+
+          {:stop, :normal, state} ->
+            {:stop, :normal, 1000, [frame], state}
+
+          {:stop, reason, close_detail, state} ->
+            {:stop, reason, close_detail, [frame], state}
+
+          {:stop, reason, close_detail, frames, state} ->
+            {:stop, reason, close_detail, [frame | frames], state}
         end
 
-      {:binary, data} ->
-        case forward_frames_to_client(rest, remaining_responses, state) do
-          {:ok, state} -> {:push, [{:binary, data}], state}
-          {:push, frames, state} -> {:push, [{:binary, data} | frames], state}
-          other -> other
-        end
-
-      {:ping, data} ->
-        case forward_frames_to_client(rest, remaining_responses, state) do
-          {:ok, state} -> {:push, [{:ping, data}], state}
-          {:push, frames, state} -> {:push, [{:ping, data} | frames], state}
-          other -> other
-        end
-
-      {:pong, data} ->
-        case forward_frames_to_client(rest, remaining_responses, state) do
-          {:ok, state} -> {:push, [{:pong, data}], state}
-          {:push, frames, state} -> {:push, [{:pong, data} | frames], state}
-          other -> other
-        end
-
-      {:close, _code, _reason} ->
-        {:stop, :normal, state}
+      {:close, code, reason} ->
+        {:stop, :normal, {code, reason}, state}
 
       :close ->
-        {:stop, :normal, state}
+        {:stop, :normal, 1000, state}
     end
   end
 
