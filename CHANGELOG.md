@@ -60,7 +60,6 @@ resource limits; review the upgrade notes before deploying.
   Fail HTTP checks on unexpected statuses.
 - Add a persistent, loopback-only example server launcher:
   `MIX_ENV=test mix run --no-halt examples/server.exs`.
-- Add concise release-maintenance instructions in `AGENTS.md`.
 
 ## v0.2.6 (2026-08-13)
 - Stream large HTTP/1 request bodies through pooled Finch connections instead of opening a fresh upstream connection per request.
