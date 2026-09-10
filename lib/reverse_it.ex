@@ -242,6 +242,7 @@ defmodule ReverseIt do
     * `:connect_timeout` - Backend connection timeout in ms (default: 5_000)
     * `:conn_max_idle_time` - Idle timeout for pooled backend HTTP/1 connections (default: 90_000)
     * `:protocols` - Upstream protocols for pooled Finch requests (default: [:http1])
+    * `:inet6` - Try IPv6 before IPv4 for pooled connections (default: false)
   """
   def child_spec(opts) do
     name = Keyword.fetch!(opts, :name)
@@ -253,7 +254,7 @@ defmodule ReverseIt do
     verify_tls = Keyword.get(opts, :verify_tls, true)
 
     transport_opts =
-      [timeout: connect_timeout]
+      [timeout: connect_timeout, inet6: Keyword.get(opts, :inet6, false)]
       |> maybe_disable_tls_verification(verify_tls)
 
     %{
