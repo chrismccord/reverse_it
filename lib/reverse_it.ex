@@ -5,6 +5,11 @@ defmodule ReverseIt do
   Built using Finch (HTTP) and Mint (WebSockets), ReverseIt is designed to work seamlessly within
   Phoenix/Plug pipelines as a standard Plug module.
 
+  WebSocket proxying currently supports Bandit. Cowboy's WebSocket process handoff is not
+  supported: the upstream socket belongs to the HTTP request process and can close during
+  the upgrade. ReverseIt logs a warning on Cowboy WebSocket attempts; use Bandit for
+  WebSocket routes. Ordinary HTTP proxying is unaffected.
+
   ## Features
 
   - **Full HTTP Support**: HTTP/1.1 proxying by default, optional HTTP/2 upstreams, and streaming request/response bodies
@@ -333,6 +338,13 @@ defmodule ReverseIt do
   end
 
   defp handle_websocket(conn, config) do
+    if match?({Plug.Cowboy.Conn, _}, conn.adapter) do
+      Logger.warning(
+        "ReverseIt WebSocket proxying is unsupported with Cowboy: the upstream socket " <>
+          "can close during Cowboy's process handoff. Use Bandit for WebSocket routes."
+      )
+    end
+
     client = %{
       headers: conn.req_headers,
       remote_ip: conn.remote_ip |> :inet.ntoa() |> to_string(),

@@ -2,6 +2,11 @@
 
 A full-featured HTTP/1.1, optional HTTP/2, and WebSocket reverse proxy for Elixir, built using Finch (HTTP) and Mint (WebSockets). Designed to work seamlessly within Phoenix/Plug pipelines.
 
+**WebSocket server compatibility:** Use Bandit for WebSocket proxy routes. Cowboy's WebSocket
+process handoff is not supported: the upstream socket belongs to the HTTP request process
+and can close during the upgrade. ReverseIt warns on Cowboy WebSocket attempts, not merely
+when Cowboy is installed. Ordinary HTTP proxying is unaffected.
+
 ## Features
 
 - **Full HTTP Support**: HTTP/1.1 proxying by default, optional HTTP/2 upstreams, and streaming request/response bodies
