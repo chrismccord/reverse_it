@@ -9,12 +9,14 @@ defmodule ReverseIt.ForwardedHeadersTest do
 
   test "replace removes all duplicate HTTP forwarded headers" do
     conn = Plug.Test.conn("GET", "/")
-    conn = %{conn | req_headers: [{"host", "public.example"} | @spoofed]}
+    unrelated = [{"x-custom", "first"}, {"x-custom", "second"}]
+    conn = %{conn | req_headers: [{"host", "public.example"} | @spoofed ++ unrelated]}
     headers = Headers.request_headers(conn, config(:replace))
 
     assert values(headers, "x-forwarded-for") == ["127.0.0.1"]
     assert values(headers, "x-forwarded-proto") == ["http"]
     assert values(headers, "x-forwarded-host") == ["public.example"]
+    assert values(headers, "x-custom") == ["first", "second"]
   end
 
   test "WebSocket replacement removes spoofed host even without a client Host header" do
