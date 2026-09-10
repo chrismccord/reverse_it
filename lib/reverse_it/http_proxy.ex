@@ -168,14 +168,14 @@ defmodule ReverseIt.HTTPProxy do
     acc = %{acc | headers: acc.headers ++ headers}
 
     cond do
-      response_content_length_exceeds?(acc.headers, acc.config) ->
-        {:halt, %{acc | error: :response_body_too_large}}
-
       informational_response?(acc.status) ->
         {:cont, %{acc | status: nil, headers: []}}
 
       not send_body?(acc.method, acc.status) ->
         send_empty_response(acc)
+
+      response_content_length_exceeds?(acc.headers, acc.config) ->
+        {:halt, %{acc | error: :response_body_too_large}}
 
       acc.config.max_response_body_size == :infinity ->
         send_chunked_headers(acc)
@@ -329,13 +329,14 @@ defmodule ReverseIt.HTTPProxy do
         _ -> "http"
       end
 
-    url = "#{scheme}://#{config.host}:#{config.port}#{target_path}"
-
-    if query_string && query_string != "" do
-      url <> "?" <> query_string
-    else
-      url
-    end
+    %URI{
+      scheme: scheme,
+      host: config.host,
+      port: config.port,
+      path: target_path,
+      query: if(query_string in [nil, ""], do: nil, else: query_string)
+    }
+    |> URI.to_string()
   end
 
   defp stream_request_with_finch(conn, url, headers, first_chunk, config) do
@@ -505,11 +506,11 @@ defmodule ReverseIt.HTTPProxy do
     case receive_response_headers(mint_conn, ref, config.response_header_timeout, nil, [], config) do
       {:ok, mint_conn, status, headers, remaining_responses} ->
         cond do
-          response_content_length_exceeds?(headers, config) ->
-            send_error_response(plug_conn, 502, "Bad Gateway: Response too large")
-
           not send_body?(plug_conn.method, status) ->
             send_empty_mint_response(plug_conn, status, headers, config)
+
+          response_content_length_exceeds?(headers, config) ->
+            send_error_response(plug_conn, 502, "Bad Gateway: Response too large")
 
           true ->
             stream_mint_response_body(

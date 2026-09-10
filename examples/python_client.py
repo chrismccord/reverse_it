@@ -34,6 +34,13 @@ def log(message, color=Colors.RESET):
     """Print colored log message"""
     print(f"{color}{message}{Colors.RESET}")
 
+def check_status(response, expected):
+    log(f"   Status: {response.status_code}",
+        Colors.GREEN if response.status_code == expected else Colors.RED)
+    if response.status_code != expected:
+        raise ValueError(f"Expected HTTP {expected}, received {response.status_code}")
+
+
 def test_http():
     """Test HTTP proxy functionality"""
     log("\n=== Testing HTTP Proxy ===", Colors.CYAN)
@@ -42,31 +49,27 @@ def test_http():
         # Test 1: Simple GET
         log("\n1. Testing simple GET /hello", Colors.YELLOW)
         response = requests.get(f"{PROXY_URL}/hello")
-        log(f"   Status: {response.status_code}",
-            Colors.GREEN if response.status_code == 200 else Colors.RED)
+        check_status(response, 200)
         log(f"   Body: {response.text}")
 
         # Test 2: JSON API endpoint
         log("\n2. Testing JSON endpoint /api/status", Colors.YELLOW)
         response = requests.get(f"{PROXY_URL}/api/status")
-        log(f"   Status: {response.status_code}",
-            Colors.GREEN if response.status_code == 200 else Colors.RED)
+        check_status(response, 200)
         data = response.json()
         log(f"   Response: {json.dumps(data, indent=2)}")
 
         # Test 3: POST with body
         log("\n3. Testing POST /echo with body", Colors.YELLOW)
         response = requests.post(f"{PROXY_URL}/echo", data="Hello from Python!")
-        log(f"   Status: {response.status_code}",
-            Colors.GREEN if response.status_code == 200 else Colors.RED)
+        check_status(response, 200)
         data = response.json()
         log(f"   Echo: {data['echo']}")
 
         # Test 4: Headers forwarding
         log("\n4. Testing header forwarding /headers", Colors.YELLOW)
         response = requests.get(f"{PROXY_URL}/headers")
-        log(f"   Status: {response.status_code}",
-            Colors.GREEN if response.status_code == 200 else Colors.RED)
+        check_status(response, 200)
         data = response.json()
         headers = data.get('headers', {})
         log(f"   X-Forwarded-For: {headers.get('x-forwarded-for', 'missing')}")
@@ -76,8 +79,7 @@ def test_http():
         # Test 5: 404 handling
         log("\n5. Testing 404 /nonexistent", Colors.YELLOW)
         response = requests.get(f"{PROXY_URL}/nonexistent")
-        log(f"   Status: {response.status_code}",
-            Colors.GREEN if response.status_code == 404 else Colors.RED)
+        check_status(response, 404)
 
         log("\n✅ HTTP tests completed", Colors.GREEN)
         return True
@@ -90,19 +92,15 @@ def test_websocket():
     """Test WebSocket proxy functionality"""
     log("\n=== Testing WebSocket Proxy ===", Colors.CYAN)
 
-    tests_passed = 0
+    tests_passed = set()
     rapid_messages = set()
-    binary_received = False
 
     def on_message(ws, message):
-        nonlocal tests_passed, rapid_messages, binary_received
-
         # Handle binary messages
         if isinstance(message, bytes):
             if message == bytes([1, 2, 3, 4, 5]):
                 log(f"   ✓ Received binary frame: {list(message)}", Colors.GREEN)
-                tests_passed += 1
-                binary_received = True
+                tests_passed.add("binary")
                 # All tests done
                 log("\n6. Closing connection", Colors.YELLOW)
                 ws.close()
@@ -111,35 +109,35 @@ def test_websocket():
         # Handle text messages
         if message == "Backend echo: Hello from Python!":
             log("   ✓ Received: " + message, Colors.GREEN)
-            tests_passed += 1
+            tests_passed.add("text")
             # Test 2: Empty text frame
             log("\n2. Testing empty text frame", Colors.YELLOW)
             ws.send("")
 
         elif message == "Backend echo: ":
             log("   ✓ Received empty echo", Colors.GREEN)
-            tests_passed += 1
+            tests_passed.add("empty")
             # Test 3: Large message
             log("\n3. Testing large message (10KB)", Colors.YELLOW)
             ws.send("A" * 10000)
 
-        elif message.startswith("Backend echo: AAAA"):
+        elif message == "Backend echo: " + "A" * 10000:
             log(f"   ✓ Received large message ({len(message)} bytes)", Colors.GREEN)
-            tests_passed += 1
+            tests_passed.add("large")
             # Test 4: Rapid messages
             log("\n4. Testing rapid successive messages", Colors.YELLOW)
             for i in range(1, 6):
                 ws.send(f"Rapid message {i}")
 
-        elif "Backend echo: Rapid message" in message:
+        elif message in {f"Backend echo: Rapid message {i}" for i in range(1, 6)}:
             # Track rapid messages
             num = int(message.split()[-1])
             rapid_messages.add(num)
             if num == 1:
                 log("   ✓ Receiving rapid messages...", Colors.GREEN)
-            if len(rapid_messages) == 5:
+            if len(rapid_messages) == 5 and "rapid" not in tests_passed:
                 log("   ✓ All 5 rapid messages received", Colors.GREEN)
-                tests_passed += 1
+                tests_passed.add("rapid")
                 # Test 5: Binary frame
                 log("\n5. Testing binary frame", Colors.YELLOW)
                 ws.send(bytes([1, 2, 3, 4, 5]), opcode=websocket.ABNF.OPCODE_BINARY)
@@ -168,11 +166,11 @@ def test_websocket():
         # Run with timeout
         ws.run_forever(ping_interval=30, ping_timeout=10)
 
-        if tests_passed >= 4:  # Allow some async variance
-            log(f"\n✅ WebSocket tests completed ({tests_passed}/5 passed)", Colors.GREEN)
+        if len(tests_passed) == 5:
+            log(f"\n✅ WebSocket tests completed ({len(tests_passed)}/5 passed)", Colors.GREEN)
             return True
         else:
-            log(f"\n⚠ Only {tests_passed}/5 tests passed", Colors.YELLOW)
+            log(f"\n⚠ Only {len(tests_passed)}/5 tests passed", Colors.YELLOW)
             return False
 
     except Exception as e:

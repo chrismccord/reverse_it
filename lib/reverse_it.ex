@@ -5,6 +5,11 @@ defmodule ReverseIt do
   Built using Finch (HTTP) and Mint (WebSockets), ReverseIt is designed to work seamlessly within
   Phoenix/Plug pipelines as a standard Plug module.
 
+  WebSocket proxying currently supports Bandit. Cowboy's WebSocket process handoff is not
+  supported: the upstream socket belongs to the HTTP request process and can close during
+  the upgrade. ReverseIt logs a warning on Cowboy WebSocket attempts; use Bandit for
+  WebSocket routes. Ordinary HTTP proxying is unaffected.
+
   ## Features
 
   - **Full HTTP Support**: HTTP/1.1 proxying by default, optional HTTP/2 upstreams, and streaming request/response bodies
@@ -243,6 +248,7 @@ defmodule ReverseIt do
     * `:upstream_send_timeout` - Socket write timeout for pooled connections in ms (default: 55_000)
     * `:conn_max_idle_time` - Idle timeout for pooled backend HTTP/1 connections (default: 90_000)
     * `:protocols` - Upstream protocols for pooled Finch requests (default: [:http1])
+    * `:inet6` - Try IPv6 before IPv4 for pooled connections (default: false)
   """
   def child_spec(opts) do
     name = Keyword.fetch!(opts, :name)
@@ -256,6 +262,7 @@ defmodule ReverseIt do
     transport_opts =
       [
         timeout: connect_timeout,
+        inet6: Keyword.get(opts, :inet6, false),
         send_timeout: Keyword.get(opts, :upstream_send_timeout, 55_000),
         send_timeout_close: true
       ]
@@ -337,6 +344,13 @@ defmodule ReverseIt do
   end
 
   defp handle_websocket(conn, config) do
+    if match?({Plug.Cowboy.Conn, _}, conn.adapter) do
+      Logger.warning(
+        "ReverseIt WebSocket proxying is unsupported with Cowboy: the upstream socket " <>
+          "can close during Cowboy's process handoff. Use Bandit for WebSocket routes."
+      )
+    end
+
     client = %{
       headers: conn.req_headers,
       remote_ip: conn.remote_ip |> :inet.ntoa() |> to_string(),
