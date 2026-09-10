@@ -163,6 +163,7 @@ end
 - `:pool_size` - Max connections per backend (default: 50)
 - `:pool_count` - Number of connection pools (default: 1)
 - `:connect_timeout` - Backend connection timeout in ms (default: 5,000)
+- `:upstream_send_timeout` - Socket write timeout for pooled upstream connections (default: 55,000); timed-out sockets are closed rather than reused
 - `:conn_max_idle_time` - Idle timeout for pooled backend HTTP/1 connections (default: 90,000)
 - `:protocols` - Upstream protocols for pooled Finch requests (default: `[:http1]`)
 - `:inet6` - Try IPv6 before IPv4 for pooled connections (default: `false`). Enable for IPv6 backends, e.g. `backend: "http://[::1]:4000"`. Direct one-shot and WebSocket connections detect IPv6 literals automatically.
@@ -178,6 +179,7 @@ end
 - `:pool_timeout` - Finch pool checkout timeout in milliseconds (default: 5,000)
 - `:response_header_timeout` - Time to wait for backend response headers in streaming paths (default: 30,000)
 - `:upstream_idle_timeout` - Rolling idle timeout while receiving backend data (default: 55,000)
+- `:upstream_send_timeout` - Socket write timeout for direct one-shot HTTP and WebSocket connections (default: 55,000). For pooled HTTP, set this on the supervisor child instead. This bounds blocked writes independently of receive timeouts; it does not add full-duplex forwarding of early backend responses.
 - `:request_body_read_timeout` - Rolling timeout while reading client request bodies (default: 55,000)
 - `:max_request_body_size` - Maximum request body size in bytes (default: 104,857,600 / 100MB, `:infinity` for unlimited)
 - `:request_body_buffer_size` - Body bytes buffered before switching to request streaming (default: 1,048,576 / 1MB)
