@@ -178,7 +178,8 @@ defmodule ReverseIt.Config do
     # Add backend path prefix if configured
     path =
       if config.path_prefix do
-        Path.join(config.path_prefix, path)
+        separator = if String.starts_with?(path, "/"), do: "", else: "/"
+        config.path_prefix <> separator <> path
       else
         path
       end
