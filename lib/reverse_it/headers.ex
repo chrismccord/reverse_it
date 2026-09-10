@@ -115,7 +115,11 @@ defmodule ReverseIt.Headers do
   end
 
   def backend_host(config) do
-    if config.port in [80, 443], do: config.host, else: "#{config.host}:#{config.port}"
+    scheme = Atom.to_string(config.scheme)
+
+    %URI{scheme: scheme, host: config.host, port: config.port}
+    |> URI.to_string()
+    |> String.replace_prefix(scheme <> "://", "")
   end
 
   defp normalize_headers(headers) do
@@ -167,10 +171,20 @@ defmodule ReverseIt.Headers do
   defp add_forwarded_headers(headers, %{forwarded_headers: false}, _client), do: headers
 
   defp add_forwarded_headers(headers, %{forwarded_headers: :replace}, client) do
-    headers
-    |> List.keystore("x-forwarded-for", 0, {"x-forwarded-for", client.remote_ip})
-    |> List.keystore("x-forwarded-proto", 0, {"x-forwarded-proto", client.scheme})
-    |> maybe_add_forwarded_host(client.host)
+    headers =
+      Enum.reject(headers, fn {name, _value} ->
+        name in ["x-forwarded-for", "x-forwarded-proto", "x-forwarded-host"]
+      end)
+
+    headers = [
+      {"x-forwarded-for", client.remote_ip},
+      {"x-forwarded-proto", client.scheme} | headers
+    ]
+
+    case client.host do
+      nil -> headers
+      host -> [{"x-forwarded-host", host} | headers]
+    end
   end
 
   defp add_forwarded_headers(headers, %{forwarded_headers: :append}, client) do

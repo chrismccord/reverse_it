@@ -69,6 +69,13 @@ jobs:
       - name: Test with warnings as errors
         run: mix test --warnings-as-errors
 
+      - name: Check optional Cowboy compatibility warning
+        if: matrix.quality
+        env:
+          MIX_ENV: prod
+          MIX_INSTALL_DIR: ${{ runner.temp }}/reverse-it-cowboy
+        run: elixir examples/cowboy_warning.exs
+
       - name: Check Node example regressions
         if: matrix.quality
         run: node --test examples/node*_test.js

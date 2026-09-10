@@ -83,7 +83,7 @@ defmodule ReverseIt.WebSocketHandshake do
         {:cont, {:ok, %{response | headers: headers}}}
 
       {:data, ^request_ref, data}, {:ok, response} ->
-        case append_body(response, data, config.max_response_body_size) do
+        case append_body(response, data, response_body_limit(response, config)) do
           {:ok, response} -> {:cont, {:ok, response}}
           {:error, reason} -> {:halt, {:error, reason, response}}
         end
@@ -105,6 +105,15 @@ defmodule ReverseIt.WebSocketHandshake do
       {:error, _reason, response} -> response
     end
   end
+
+  # Bytes after a 101 belong to the WebSocket, not to an HTTP rejection body.
+  defp response_body_limit(%{status: 101}, config), do: config.max_response_body_size
+
+  defp response_body_limit(_response, %{max_response_body_size: :infinity} = config),
+    do: config.max_websocket_upgrade_response_body_size
+
+  defp response_body_limit(_response, config),
+    do: min(config.max_response_body_size, config.max_websocket_upgrade_response_body_size)
 
   defp append_body(response, data, :infinity) do
     {:ok,
@@ -131,10 +140,12 @@ defmodule ReverseIt.WebSocketHandshake do
         finish_switching_protocols(conn, request_ref, response, config, client)
 
       status when is_integer(status) ->
-        headers = client_response_headers(response.headers || [], config)
-        body = response.body |> Enum.reverse() |> IO.iodata_to_binary()
         Mint.HTTP.close(conn)
-        {:reject, status, headers, body}
+
+        with {:ok, headers} <- Headers.response_headers(response.headers || [], config) do
+          body = response.body |> Enum.reverse() |> IO.iodata_to_binary()
+          {:reject, status, client_response_headers(headers), body}
+        end
 
       _missing ->
         Mint.HTTP.close(conn)
@@ -160,11 +171,16 @@ defmodule ReverseIt.WebSocketHandshake do
         conn: conn,
         websocket: websocket,
         request_ref: request_ref,
-        client: client
+        client: client,
+        initial_backend_data: response.body |> Enum.reverse() |> IO.iodata_to_binary()
       }
 
       {:ok, state, client_response_headers(response_headers)}
     else
+      {:error, conn, reason} ->
+        Mint.HTTP.close(conn)
+        {:error, reason}
+
       {:error, reason} ->
         Mint.HTTP.close(conn)
         {:error, reason}
@@ -195,13 +211,6 @@ defmodule ReverseIt.WebSocketHandshake do
     Enum.reject(headers, fn {name, _value} ->
       MapSet.member?(@client_managed_headers, String.downcase(name))
     end)
-  end
-
-  defp client_response_headers(headers, config) do
-    case Headers.response_headers(headers, config) do
-      {:ok, headers} -> client_response_headers(headers)
-      {:error, _reason} -> []
-    end
   end
 
   defp header_tokens(headers, name) do

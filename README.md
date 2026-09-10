@@ -2,6 +2,11 @@
 
 A full-featured HTTP/1.1, optional HTTP/2, and WebSocket reverse proxy for Elixir, built using Finch (HTTP) and Mint (WebSockets). Designed to work seamlessly within Phoenix/Plug pipelines.
 
+**WebSocket server compatibility:** Use Bandit for WebSocket proxy routes. Cowboy's WebSocket
+process handoff is not supported: the upstream socket belongs to the HTTP request process
+and can close during the upgrade. ReverseIt warns on Cowboy WebSocket attempts, not merely
+when Cowboy is installed. Ordinary HTTP proxying is unaffected.
+
 ## Features
 
 - **Full HTTP Support**: HTTP/1.1 proxying by default, optional HTTP/2 upstreams, and streaming request/response bodies
@@ -160,6 +165,7 @@ end
 - `:connect_timeout` - Backend connection timeout in ms (default: 5,000)
 - `:conn_max_idle_time` - Idle timeout for pooled backend HTTP/1 connections (default: 90,000)
 - `:protocols` - Upstream protocols for pooled Finch requests (default: `[:http1]`)
+- `:inet6` - Try IPv6 before IPv4 for pooled connections (default: `false`). Enable for IPv6 backends, e.g. `backend: "http://[::1]:4000"`. Direct one-shot and WebSocket connections detect IPv6 literals automatically.
 
 ### Plug Options (when using as a Plug)
 
@@ -187,6 +193,7 @@ end
 - `:protocols` - List of supported upstream protocols (default: `[:http1]`)
 - `:websocket_idle_timeout` - WebSocket idle timeout in milliseconds (default: 55,000)
 - `:websocket_backend_upgrade_timeout` - Backend WebSocket upgrade timeout (default: 5,000)
+- `:max_websocket_upgrade_response_body_size` - Maximum buffered backend upgrade rejection body (default: 65,536 / 64KB). Must be a finite non-negative integer; a smaller `:max_response_body_size` also applies. Oversized rejections use `:error_response` instead of buffering indefinitely.
 - `:max_websocket_frame_size` - Maximum WebSocket frame/message size (default: 16,777,216 / 16MB)
 - `:max_websocket_pending_bytes` - Maximum bytes buffered before backend upgrade completes (default: 1,048,576 / 1MB)
 - `:max_websocket_pending_frames` - Maximum frame count buffered before backend upgrade completes (default: 16)

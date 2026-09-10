@@ -378,7 +378,6 @@ defmodule ReverseItTest do
         ])
 
       {:ok, upstream_port} = :inet.port(listener)
-      proxy_port = TestHelper.find_available_port()
 
       on_exit(fn -> :gen_tcp.close(listener) end)
 
@@ -401,17 +400,20 @@ defmodule ReverseItTest do
         )
       )
 
-      start_supervised!(
-        Supervisor.child_spec(
-          {Bandit,
-           plug:
-             {ReverseIt, name: ReverseIt.TestFinch, backend: "http://127.0.0.1:#{upstream_port}"},
-           scheme: :http,
-           port: proxy_port,
-           thousand_island_options: [silent_terminate_on_error: true]},
-          id: {:truncated_proxy, make_ref()}
+      proxy_port =
+        start_supervised!(
+          Supervisor.child_spec(
+            {Bandit,
+             plug:
+               {ReverseIt,
+                name: ReverseIt.TestFinch, backend: "http://127.0.0.1:#{upstream_port}"},
+             scheme: :http,
+             port: 0,
+             thousand_island_options: [silent_terminate_on_error: true]},
+            id: {:truncated_proxy, make_ref()}
+          )
         )
-      )
+        |> TestHelper.listener_port()
 
       assert {:error, %{reason: :closed}} =
                Req.get("http://127.0.0.1:#{proxy_port}/object", retry: false)
@@ -428,7 +430,6 @@ defmodule ReverseItTest do
         ])
 
       {:ok, upstream_port} = :inet.port(listener)
-      proxy_port = TestHelper.find_available_port()
       on_exit(fn -> :gen_tcp.close(listener) end)
 
       start_supervised!(
@@ -454,20 +455,22 @@ defmodule ReverseItTest do
         )
       )
 
-      start_supervised!(
-        Supervisor.child_spec(
-          {Bandit,
-           plug:
-             {ReverseIt,
-              name: ReverseIt.TestFinch,
-              backend: "http://127.0.0.1:#{upstream_port}",
-              response_header_retries: 1},
-           scheme: :http,
-           port: proxy_port,
-           thousand_island_options: [silent_terminate_on_error: true]},
-          id: {:retry_proxy, make_ref()}
+      proxy_port =
+        start_supervised!(
+          Supervisor.child_spec(
+            {Bandit,
+             plug:
+               {ReverseIt,
+                name: ReverseIt.TestFinch,
+                backend: "http://127.0.0.1:#{upstream_port}",
+                response_header_retries: 1},
+             scheme: :http,
+             port: 0,
+             thousand_island_options: [silent_terminate_on_error: true]},
+            id: {:retry_proxy, make_ref()}
+          )
         )
-      )
+        |> TestHelper.listener_port()
 
       assert %Req.Response{status: 200, body: "ok"} =
                Req.get!("http://127.0.0.1:#{proxy_port}/object", retry: false)
@@ -566,14 +569,15 @@ defmodule ReverseItTest do
       # Isolate the pool and limit it to one connection: a shared multi-connection
       # pool may legitimately hand out different connections to these requests.
       start_supervised!({ReverseIt, name: ReverseIt.StreamingReuseFinch, pool_size: 1})
-      port = TestHelper.find_available_port()
 
-      start_supervised!(
-        {Bandit,
-         plug: {ReverseIt, name: ReverseIt.StreamingReuseFinch, backend: backend_url()},
-         scheme: :http,
-         port: port}
-      )
+      port =
+        start_supervised!(
+          {Bandit,
+           plug: {ReverseIt, name: ReverseIt.StreamingReuseFinch, backend: backend_url()},
+           scheme: :http,
+           port: 0}
+        )
+        |> TestHelper.listener_port()
 
       body = :binary.copy("A", 2 * 1024 * 1024)
       url = "http://localhost:#{port}/upload-peer"
@@ -691,7 +695,6 @@ defmodule ReverseItTest do
     test "proxies WebSocket messages through a Unix socket" do
       path = TestHelper.unix_socket_path()
 
-      proxy_port = TestHelper.find_available_port()
       File.rm(path)
 
       start_supervised!(
@@ -706,22 +709,24 @@ defmodule ReverseItTest do
         )
       )
 
-      start_supervised!(
-        Supervisor.child_spec(
-          {Bandit,
-           plug:
-             {ReverseIt.TestUnixProxy,
-              name: ReverseIt.TestFinch,
-              backend: "ws://provider-tunnel",
-              unix_socket: path,
-              upstream_connection: :one_shot,
-              protocols: [:http1]},
-           scheme: :http,
-           port: proxy_port,
-           thousand_island_options: [silent_terminate_on_error: true]},
-          id: {:unix_websocket_proxy, make_ref()}
+      proxy_port =
+        start_supervised!(
+          Supervisor.child_spec(
+            {Bandit,
+             plug:
+               {ReverseIt.TestUnixProxy,
+                name: ReverseIt.TestFinch,
+                backend: "ws://provider-tunnel",
+                unix_socket: path,
+                upstream_connection: :one_shot,
+                protocols: [:http1]},
+             scheme: :http,
+             port: 0,
+             thousand_island_options: [silent_terminate_on_error: true]},
+            id: {:unix_websocket_proxy, make_ref()}
+          )
         )
-      )
+        |> TestHelper.listener_port()
 
       on_exit(fn -> File.rm(path) end)
 
@@ -998,29 +1003,50 @@ defmodule ReverseItTest do
       {:ok, conn, ref} = Mint.WebSocket.upgrade(:ws, conn, "/tiny-ws/ws", [])
       {:ok, conn, websocket} = wait_for_ws_upgrade(conn, ref, 5000)
 
-      {:ok, _websocket, data} =
+      {:ok, websocket, data} =
         Mint.WebSocket.encode(websocket, {:text, String.duplicate("A", 256)})
 
       {:ok, conn} = Mint.WebSocket.stream_request_body(conn, ref, data)
+      deadline = System.monotonic_time(:millisecond) + 2_000
 
-      assert_receive message, 2000
-
-      case Mint.WebSocket.stream(conn, message) do
-        {:ok, _conn, responses} ->
-          assert Enum.any?(responses, fn
-                   {:data, ^ref, _data} -> true
-                   {:done, ^ref} -> true
-                   _other -> false
-                 end)
-
-        {:error, _conn, _reason, _responses} ->
-          assert true
-
-        :unknown ->
-          assert match?({:tcp_closed, _socket}, message)
+      try do
+        assert_ws_size_limit_close(conn, websocket, ref, deadline)
+      after
+        Mint.HTTP.close(conn)
       end
+    end
+  end
 
-      Mint.HTTP.close(conn)
+  defp assert_ws_size_limit_close(conn, websocket, ref, deadline) do
+    socket = Mint.HTTP.get_socket(conn)
+    timeout = max(deadline - System.monotonic_time(:millisecond), 0)
+
+    receive do
+      {:tcp, ^socket, _data} = message ->
+        assert {:ok, conn, responses} = Mint.WebSocket.stream(conn, message)
+
+        {websocket, frames} =
+          Enum.reduce(responses, {websocket, []}, fn
+            {:data, ^ref, data}, {websocket, frames} ->
+              assert {:ok, websocket, decoded} = Mint.WebSocket.decode(websocket, data)
+              {websocket, frames ++ decoded}
+
+            _response, acc ->
+              acc
+          end)
+
+        case frames do
+          [] -> assert_ws_size_limit_close(conn, websocket, ref, deadline)
+          frames -> assert [{:close, 1009, _reason}] = frames
+        end
+
+      {:tcp_closed, ^socket} ->
+        flunk("WebSocket closed without a 1009 close frame")
+
+      {:tcp_error, ^socket, reason} ->
+        flunk("WebSocket transport failed instead of sending a 1009 close: #{inspect(reason)}")
+    after
+      timeout -> flunk("Timed out waiting for a 1009 close frame")
     end
   end
 

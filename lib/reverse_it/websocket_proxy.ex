@@ -16,6 +16,7 @@ defmodule ReverseIt.WebSocketProxy do
     :request_ref,
     :client,
     :backend_upgrade_timer,
+    initial_backend_data: <<>>,
     pending_frames: [],
     pending_bytes: 0
   ]
@@ -27,6 +28,7 @@ defmodule ReverseIt.WebSocketProxy do
           request_ref: Mint.Types.request_ref(),
           client: map(),
           backend_upgrade_timer: reference() | nil,
+          initial_backend_data: binary(),
           pending_frames: [Mint.WebSocket.frame()],
           pending_bytes: non_neg_integer()
         }
@@ -39,7 +41,12 @@ defmodule ReverseIt.WebSocketProxy do
   - client_headers: Original client headers for forwarding
   """
   @impl WebSock
-  def init(%__MODULE__{} = state), do: {:ok, state}
+  def init(%__MODULE__{initial_backend_data: <<>>} = state), do: {:ok, state}
+
+  def init(%__MODULE__{} = state) do
+    responses = [{:data, state.request_ref, state.initial_backend_data}]
+    process_backend_responses(responses, %{state | initial_backend_data: <<>>})
+  end
 
   def init(opts) do
     config = Keyword.fetch!(opts, :config)
@@ -340,39 +347,29 @@ defmodule ReverseIt.WebSocketProxy do
 
   defp forward_frames_to_client([frame | rest], remaining_responses, state) do
     case frame do
-      {:text, data} ->
+      {opcode, _data} when opcode in [:text, :binary, :ping, :pong] ->
         case forward_frames_to_client(rest, remaining_responses, state) do
-          {:ok, state} -> {:push, [{:text, data}], state}
-          {:push, frames, state} -> {:push, [{:text, data} | frames], state}
-          other -> other
+          {:ok, state} ->
+            {:push, [frame], state}
+
+          {:push, frames, state} ->
+            {:push, [frame | frames], state}
+
+          {:stop, :normal, state} ->
+            {:stop, :normal, 1000, [frame], state}
+
+          {:stop, reason, close_detail, state} ->
+            {:stop, reason, close_detail, [frame], state}
+
+          {:stop, reason, close_detail, frames, state} ->
+            {:stop, reason, close_detail, [frame | frames], state}
         end
 
-      {:binary, data} ->
-        case forward_frames_to_client(rest, remaining_responses, state) do
-          {:ok, state} -> {:push, [{:binary, data}], state}
-          {:push, frames, state} -> {:push, [{:binary, data} | frames], state}
-          other -> other
-        end
-
-      {:ping, data} ->
-        case forward_frames_to_client(rest, remaining_responses, state) do
-          {:ok, state} -> {:push, [{:ping, data}], state}
-          {:push, frames, state} -> {:push, [{:ping, data} | frames], state}
-          other -> other
-        end
-
-      {:pong, data} ->
-        case forward_frames_to_client(rest, remaining_responses, state) do
-          {:ok, state} -> {:push, [{:pong, data}], state}
-          {:push, frames, state} -> {:push, [{:pong, data} | frames], state}
-          other -> other
-        end
-
-      {:close, _code, _reason} ->
-        {:stop, :normal, state}
+      {:close, code, reason} ->
+        {:stop, :normal, {code, reason}, state}
 
       :close ->
-        {:stop, :normal, state}
+        {:stop, :normal, 1000, state}
     end
   end
 
