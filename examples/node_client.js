@@ -80,6 +80,13 @@ function httpPost(path, body) {
   });
 }
 
+function checkStatus(response, expected) {
+  log(`   Status: ${response.status}`, response.status === expected ? 'green' : 'red');
+  if (response.status !== expected) {
+    throw new Error(`Expected HTTP ${expected}, received ${response.status}`);
+  }
+}
+
 async function testHTTP() {
   log('\n=== Testing HTTP Proxy ===', 'cyan');
 
@@ -87,27 +94,27 @@ async function testHTTP() {
     // Test 1: Simple GET
     log('\n1. Testing simple GET /hello', 'yellow');
     const helloRes = await httpGet('/hello');
-    log(`   Status: ${helloRes.status}`, helloRes.status === 200 ? 'green' : 'red');
+    checkStatus(helloRes, 200);
     log(`   Body: ${helloRes.body}`);
 
     // Test 2: JSON API endpoint
     log('\n2. Testing JSON endpoint /api/status', 'yellow');
     const statusRes = await httpGet('/api/status');
-    log(`   Status: ${statusRes.status}`, statusRes.status === 200 ? 'green' : 'red');
+    checkStatus(statusRes, 200);
     const statusJson = JSON.parse(statusRes.body);
     log(`   Response: ${JSON.stringify(statusJson, null, 2)}`);
 
     // Test 3: POST with body
     log('\n3. Testing POST /echo with body', 'yellow');
     const echoRes = await httpPost('/echo', 'Hello from Node.js!');
-    log(`   Status: ${echoRes.status}`, echoRes.status === 200 ? 'green' : 'red');
+    checkStatus(echoRes, 200);
     const echoJson = JSON.parse(echoRes.body);
     log(`   Echo: ${echoJson.echo}`);
 
     // Test 4: Headers forwarding
     log('\n4. Testing header forwarding /headers', 'yellow');
     const headersRes = await httpGet('/headers');
-    log(`   Status: ${headersRes.status}`, headersRes.status === 200 ? 'green' : 'red');
+    checkStatus(headersRes, 200);
     const headersJson = JSON.parse(headersRes.body);
     log(`   X-Forwarded-For: ${headersJson.headers['x-forwarded-for'] || 'missing'}`);
     log(`   X-Forwarded-Proto: ${headersJson.headers['x-forwarded-proto'] || 'missing'}`);
@@ -116,7 +123,7 @@ async function testHTTP() {
     // Test 5: 404 handling
     log('\n5. Testing 404 /nonexistent', 'yellow');
     const notFoundRes = await httpGet('/nonexistent');
-    log(`   Status: ${notFoundRes.status}`, notFoundRes.status === 404 ? 'green' : 'red');
+    checkStatus(notFoundRes, 404);
 
     log('\n✅ HTTP tests completed', 'green');
 
@@ -131,8 +138,24 @@ function testWebSocket() {
     log('\n=== Testing WebSocket Proxy ===', 'cyan');
 
     const ws = new WebSocket('ws://localhost:4000/ws');
-    let testsPassed = 0;
+    const testsPassed = new Set();
+    const rapidMessages = new Set();
     const testsTotal = 5;
+    let settled = false;
+
+    function finish(error) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      if (error) reject(error);
+      else resolve();
+    }
+
+    // Bound both connection establishment and frame exchange.
+    const timeout = setTimeout(() => {
+      finish(new Error(`WebSocket test timed out (${testsPassed.size}/${testsTotal} passed)`));
+      ws.terminate();
+    }, 5000);
 
     ws.on('open', () => {
       log('\n✓ WebSocket connection established', 'green');
@@ -142,12 +165,13 @@ function testWebSocket() {
       ws.send('Hello from Node.js!');
     });
 
-    ws.on('message', (data) => {
+    ws.on('message', (data, isBinary) => {
+      if (isBinary) return;
       const message = data.toString();
 
       if (message === 'Backend echo: Hello from Node.js!') {
         log('   ✓ Received: ' + message, 'green');
-        testsPassed++;
+        testsPassed.add('text');
 
         // Test 2: Empty text frame
         log('\n2. Testing empty text frame', 'yellow');
@@ -155,16 +179,16 @@ function testWebSocket() {
 
       } else if (message === 'Backend echo: ') {
         log('   ✓ Received empty echo', 'green');
-        testsPassed++;
+        testsPassed.add('empty');
 
         // Test 3: Large message
         log('\n3. Testing large message (10KB)', 'yellow');
         const largeMsg = 'A'.repeat(10000);
         ws.send(largeMsg);
 
-      } else if (message.startsWith('Backend echo: AAAA')) {
+      } else if (message === `Backend echo: ${'A'.repeat(10000)}`) {
         log(`   ✓ Received large message (${message.length} bytes)`, 'green');
-        testsPassed++;
+        testsPassed.add('large');
 
         // Test 4: Rapid messages
         log('\n4. Testing rapid successive messages', 'yellow');
@@ -172,15 +196,15 @@ function testWebSocket() {
           ws.send(`Rapid message ${i}`);
         }
 
-      } else if (message.match(/Backend echo: Rapid message \d/)) {
-        // Count rapid messages
-        const rapidNum = parseInt(message.match(/\d/)[0]);
+      } else if (message.match(/^Backend echo: Rapid message [1-5]$/)) {
+        const rapidNum = Number(message.at(-1));
+        rapidMessages.add(rapidNum);
         if (rapidNum === 1) {
           log('   ✓ Receiving rapid messages...', 'green');
         }
-        if (rapidNum === 5) {
+        if (rapidMessages.size === 5 && !testsPassed.has('rapid')) {
           log('   ✓ All 5 rapid messages received', 'green');
-          testsPassed++;
+          testsPassed.add('rapid');
 
           // Test 5: Binary frame
           log('\n5. Testing binary frame', 'yellow');
@@ -192,27 +216,28 @@ function testWebSocket() {
 
     ws.on('error', (error) => {
       log(`\n❌ WebSocket error: ${error.message}`, 'red');
-      reject(error);
+      finish(error);
     });
 
     ws.on('close', () => {
+      if (settled) return;
       log('\n✓ WebSocket connection closed', 'green');
 
-      if (testsPassed >= testsTotal - 1) { // Allow binary test to be async
-        log(`\n✅ WebSocket tests completed (${testsPassed}/${testsTotal} passed)`, 'green');
-        resolve();
+      if (testsPassed.size === testsTotal) {
+        log(`\n✅ WebSocket tests completed (${testsPassed.size}/${testsTotal} passed)`, 'green');
+        finish();
       } else {
-        reject(new Error(`Only ${testsPassed}/${testsTotal} tests passed`));
+        finish(new Error(`Only ${testsPassed.size}/${testsTotal} tests passed`));
       }
     });
 
     // Handle binary messages
-    ws.on('message', (data) => {
-      if (Buffer.isBuffer(data) && data.length === 5) {
+    ws.on('message', (data, isBinary) => {
+      if (isBinary && Buffer.isBuffer(data) && data.length === 5) {
         const expected = Buffer.from([1, 2, 3, 4, 5]);
         if (data.equals(expected)) {
           log('   ✓ Received binary frame: ' + Array.from(data).join(', '), 'green');
-          testsPassed++;
+          testsPassed.add('binary');
 
           // All tests done, close connection
           log('\n6. Closing connection', 'yellow');
@@ -220,15 +245,6 @@ function testWebSocket() {
         }
       }
     });
-
-    // Timeout after 5 seconds
-    setTimeout(() => {
-      if (ws.readyState === WebSocket.OPEN) {
-        log('\n⚠ Test timeout, closing connection', 'yellow');
-        ws.close();
-        resolve(); // Don't fail on timeout, just complete
-      }
-    }, 5000);
   });
 }
 

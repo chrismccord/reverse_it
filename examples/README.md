@@ -4,17 +4,19 @@ This directory contains example client implementations in different languages to
 
 ## Prerequisites
 
-Make sure the test servers are running:
+Start the dedicated example servers and leave them running:
 
 ```bash
 # From the project root
-mix test --only websocket
-# Or run the test suite which starts the servers
+MIX_ENV=test mix run --no-halt examples/server.exs
 ```
 
 The examples expect:
 - **Proxy server** on `http://localhost:4000`
 - **Backend server** on `http://localhost:4001`
+
+The servers bind only to loopback. Stop them with Ctrl+C. `mix test` uses temporary
+random ports and exits when the suite finishes; it is not the example-server launcher.
 
 ## Node.js Client
 
@@ -154,7 +156,7 @@ Make sure the test servers are running. Start them with:
 
 ```bash
 # Terminal 1: Start backend
-MIX_ENV=test mix run --no-halt
+MIX_ENV=test mix run --no-halt examples/server.exs
 
 # Terminal 2: Run tests to start both servers
 mix test

@@ -249,11 +249,12 @@ mix test --warnings-as-errors
 
 ### Interactive Testing
 
-For manual/interactive testing, the example clients can be used while tests are running:
+For manual/interactive testing, start the dedicated example servers in a separate terminal.
+They bind to loopback on ports 4000 (proxy) and 4001 (backend) and remain running until stopped:
 
 ```bash
-# Terminal 1: Keep test servers running
-mix test --trace
+# Terminal 1: Keep example servers running
+MIX_ENV=test mix run --no-halt examples/server.exs
 
 # Terminal 2: Run example clients
 node examples/node_client.js
