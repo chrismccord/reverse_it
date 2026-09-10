@@ -5,6 +5,8 @@ defmodule ReverseIt.IPv6AuthorityTest do
     for {backend, expected} <- [
           {"http://[::1]", "[::1]"},
           {"https://[::1]", "[::1]"},
+          {"ws://[::1]", "[::1]"},
+          {"wss://[::1]", "[::1]"},
           {"ws://[::1]:443", "[::1]:443"},
           {"wss://[::1]:80", "[::1]:80"},
           {"http://example.com:443", "example.com:443"},
@@ -19,9 +21,10 @@ defmodule ReverseIt.IPv6AuthorityTest do
     end
   end
 
-  for mode <- [:pooled, :one_shot] do
+  for mode <- [:pooled, :one_shot], target <- ["/a%2Fb?x=%2F", "/objects//a/", "/"] do
     @mode mode
-    test "#{mode}: IPv6 backend receives the original target and a valid Host" do
+    @target target
+    test "#{mode}: IPv6 backend receives #{@target} unchanged and a valid Host" do
       start_supervised!({ReverseIt, name: __MODULE__, inet6: true})
 
       {:ok, listener} =
@@ -49,10 +52,10 @@ defmodule ReverseIt.IPv6AuthorityTest do
           upstream_connection: @mode
         )
 
-      conn = Plug.Test.conn("GET", "/a%2Fb?x=%2F") |> ReverseIt.call(config)
+      conn = Plug.Test.conn("GET", @target) |> ReverseIt.call(config)
       assert conn.status == 200
       assert_receive {:request, request}
-      assert request =~ "GET /a%2Fb?x=%2F HTTP/1.1\r\n"
+      assert request =~ "GET #{@target} HTTP/1.1\r\n"
       assert request =~ "host: [::1]:#{port}\r\n"
     end
   end

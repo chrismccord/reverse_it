@@ -329,13 +329,14 @@ defmodule ReverseIt.HTTPProxy do
         _ -> "http"
       end
 
-    url = "#{scheme}://#{Headers.backend_host(config)}#{target_path}"
-
-    if query_string && query_string != "" do
-      url <> "?" <> query_string
-    else
-      url
-    end
+    %URI{
+      scheme: scheme,
+      host: config.host,
+      port: config.port,
+      path: target_path,
+      query: if(query_string in [nil, ""], do: nil, else: query_string)
+    }
+    |> URI.to_string()
   end
 
   defp stream_request_with_finch(conn, url, headers, first_chunk, config) do

@@ -115,9 +115,11 @@ defmodule ReverseIt.Headers do
   end
 
   def backend_host(config) do
-    host = if String.contains?(config.host, ":"), do: "[#{config.host}]", else: config.host
-    default_port = if config.scheme in [:https, :wss], do: 443, else: 80
-    if config.port == default_port, do: host, else: "#{host}:#{config.port}"
+    scheme = Atom.to_string(config.scheme)
+
+    %URI{scheme: scheme, host: config.host, port: config.port}
+    |> URI.to_string()
+    |> String.replace_prefix(scheme <> "://", "")
   end
 
   defp normalize_headers(headers) do
