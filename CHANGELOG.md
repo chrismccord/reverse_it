@@ -20,9 +20,15 @@ resource limits; review the upgrade notes before deploying.
   of early backend responses.
 - Use Bandit for WebSocket proxy routes. Cowboy's process handoff remains
   unsupported; ReverseIt now logs a warning on Cowboy WebSocket attempts.
+- Use Bandit 1.12.2 or newer when response compression is enabled. Older versions
+  can compress a length-delimited response stream without updating its declared
+  `Content-Length`.
 
 ### HTTP fixes
 
+- Preserve backend `Content-Length` on streamed downloads in pooled and one-shot
+  modes so clients can report download progress, without buffering the complete
+  response. Responses without a length continue to use HTTP/1.1 chunked framing.
 - Remove every untrusted `X-Forwarded-For`, `X-Forwarded-Proto`, and
   `X-Forwarded-Host` occurrence in `forwarded_headers: :replace` mode before
   adding trusted values. This also applies to WebSocket upgrade requests.

@@ -227,7 +227,7 @@ defmodule ReverseIt.Headers do
     end
   end
 
-  defp maybe_strip_content_headers(headers, :chunked),
+  defp maybe_strip_content_headers(headers, :bodyless),
     do: reject_header_names(headers, @content_headers)
 
   defp maybe_strip_content_headers(headers, _mode), do: headers

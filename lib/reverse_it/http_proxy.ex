@@ -256,7 +256,8 @@ defmodule ReverseIt.HTTPProxy do
   defp send_chunked_headers(%{sent?: true} = acc), do: {:cont, acc}
 
   defp send_chunked_headers(%{status: status} = acc) when is_integer(status) do
-    with {:ok, headers} <- Headers.response_headers(acc.headers, acc.config, mode: :chunked) do
+    with {:ok, headers} <- Headers.response_headers(acc.headers, acc.config) do
+      # Plug streams a length-delimited body when Content-Length is present.
       conn =
         acc.conn
         |> Headers.put_response_headers(headers)
@@ -273,7 +274,7 @@ defmodule ReverseIt.HTTPProxy do
   defp send_empty_response(%{sent?: true} = acc), do: {:cont, acc}
 
   defp send_empty_response(%{status: status} = acc) when is_integer(status) do
-    mode = if acc.method == "HEAD", do: :identity, else: :chunked
+    mode = if acc.method == "HEAD", do: :identity, else: :bodyless
 
     with {:ok, headers} <- Headers.response_headers(acc.headers, acc.config, mode: mode) do
       conn =
@@ -531,7 +532,7 @@ defmodule ReverseIt.HTTPProxy do
   end
 
   defp send_empty_mint_response(plug_conn, status, headers, config) do
-    mode = if plug_conn.method == "HEAD", do: :identity, else: :chunked
+    mode = if plug_conn.method == "HEAD", do: :identity, else: :bodyless
 
     case Headers.response_headers(headers, config, mode: mode) do
       {:ok, headers} ->
@@ -553,7 +554,7 @@ defmodule ReverseIt.HTTPProxy do
          remaining_responses,
          config
        ) do
-    case Headers.response_headers(headers, config, mode: :chunked) do
+    case Headers.response_headers(headers, config) do
       {:ok, headers} ->
         plug_conn =
           plug_conn
