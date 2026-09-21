@@ -10,6 +10,10 @@ defmodule ReverseIt do
   the upgrade. ReverseIt logs a warning on Cowboy WebSocket attempts; use Bandit for
   WebSocket routes. Ordinary HTTP proxying is unaffected.
 
+  Streamed downloads preserve the backend's `Content-Length` without buffering the
+  complete response. Use Bandit 1.12.2 or newer when response compression is enabled
+  so the server does not compress a length-delimited stream and invalidate its length.
+
   ## Features
 
   - **Full HTTP Support**: HTTP/1.1 proxying by default, optional HTTP/2 upstreams, and streaming request/response bodies

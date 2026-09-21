@@ -301,6 +301,13 @@ Pooled HTTP/1 requests retain their checked-out connection while streaming
 request bodies in bounded chunks. Large uploads therefore remain memory-bounded
 without giving up upstream connection reuse.
 
+Response bodies are streamed without buffering the complete download. When the
+backend supplies `Content-Length`, ReverseIt preserves it so clients can report
+download progress; HTTP/1.1 responses without a length use chunked transfer
+encoding instead. Use Bandit 1.12.2 or newer when response compression is enabled:
+older versions can compress a length-delimited stream without updating its
+declared length.
+
 ### WebSocket Proxy Flow
 ```
 Client ↔ Phoenix/Bandit ↔ ReverseIt (Plug) ↔ ReverseIt.WebSocketProxy (WebSock) ↔ Mint.WebSocket ↔ Backend
