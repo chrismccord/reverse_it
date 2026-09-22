@@ -48,6 +48,8 @@ defmodule ReverseIt.ResponseHandler do
   avoid downstream header timeouts for quiet streams. Any later failure,
   including rejection of the first data chunk, aborts the response instead of
   returning an unsent error. Bodyless responses are sent immediately as well.
+  An empty options list or `commit: :output` keeps the default deferred behavior,
+  equivalent to returning `{:stream, headers, state}`.
 
   The buffer limit and `max_response_body_size` both apply. The proxy does not
   decompress responses; reject unsupported encodings here if processing requires
@@ -55,7 +57,7 @@ defmodule ReverseIt.ResponseHandler do
   """
   @callback handle_headers(pos_integer(), headers(), term()) ::
               {:stream, headers(), term()}
-              | {:stream, headers(), term(), [commit: :headers]}
+              | {:stream, headers(), term(), [commit: :headers | :output]}
               | {:buffer, non_neg_integer(), term()}
               | {:error, term(), term()}
 

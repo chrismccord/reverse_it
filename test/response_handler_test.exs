@@ -446,18 +446,35 @@ defmodule ReverseIt.ResponseHandlerTest do
       end
     end
 
-    test "#{mode}: first-chunk rejection stays unsent with finite or infinite limits" do
-      for limit <- [:infinity, 100] do
+    test "#{mode}: first-chunk rejection stays unsent for every deferred option form" do
+      for commit <- [nil, :output, []], limit <- [:infinity, 100] do
         {port, _} = backend("HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello")
 
         assert {:error, :bad_data, conn, %{bytes: 5}} =
                  request(
                    Plug.Test.conn(:get, "/"),
-                   config(@mode, port, :reject_data, max_response_body_size: limit)
+                   config(@mode, port, :reject_data,
+                     commit: commit,
+                     max_response_body_size: limit
+                   )
                  )
 
         assert conn.state == :unset
         assert_receive {:terminated, {:error, :bad_data}, _}
+      end
+    end
+
+    test "#{mode}: explicit default commitment options stream the complete response" do
+      for commit <- [:output, []] do
+        {port, _} = backend("HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello")
+
+        assert {:ok, conn, state} =
+                 request(Plug.Test.conn(:get, "/"), config(@mode, port, :suffix, commit: commit))
+
+        assert conn.status == 200
+        assert conn.resp_body == "hello!"
+        assert state.bytes == 5
+        assert_receive {:terminated, :ok, ^state}
       end
     end
 
@@ -747,7 +764,7 @@ defmodule ReverseIt.ResponseHandlerTest do
   end
 
   defp config(connection_mode, port, handler_mode, opts \\ []) do
-    {commit, opts} = Keyword.pop(opts, :commit, :output)
+    {commit, opts} = Keyword.pop(opts, :commit)
     {request_opts, static_opts} = Keyword.split(opts, [:request_body, :response_handler])
 
     config =

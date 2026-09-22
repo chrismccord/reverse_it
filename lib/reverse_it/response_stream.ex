@@ -129,8 +129,11 @@ defmodule ReverseIt.ResponseStream do
       {:stream, headers, state} ->
         prepare_stream(acc, headers, state, :output)
 
-      {:stream, headers, state, commit: :headers} ->
-        prepare_stream(acc, headers, state, :headers)
+      {:stream, headers, state, []} ->
+        prepare_stream(acc, headers, state, :output)
+
+      {:stream, headers, state, commit: commitment} when commitment in [:headers, :output] ->
+        prepare_stream(acc, headers, state, commitment)
 
       {:buffer, limit, state} when is_integer(limit) and limit >= 0 ->
         acc = %{acc | response_mode: :buffer, buffer_limit: limit, handler_state: state}

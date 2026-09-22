@@ -244,6 +244,13 @@ defmodule ReverseIt do
     WebSocketProxy
   }
 
+  @typedoc "A complete, unsent response returned by `request/3`."
+  @type buffered_response :: %{
+          status: pos_integer(),
+          headers: [{String.t(), String.t()}],
+          body: binary()
+        }
+
   @doc """
   Child spec for starting ReverseIt with a Finch connection pool.
 
@@ -363,7 +370,7 @@ defmodule ReverseIt do
   """
   @spec request(Plug.Conn.t(), Config.t(), keyword()) ::
           {:ok, Plug.Conn.t(), term()}
-          | {:buffered, map(), Plug.Conn.t(), term()}
+          | {:buffered, buffered_response(), Plug.Conn.t(), term()}
           | {:error, term(), Plug.Conn.t(), term()}
   def request(conn, %Config{} = config, opts \\ []) do
     request_options = RequestOptions.parse!(opts)
@@ -391,16 +398,14 @@ defmodule ReverseIt do
 
   Replaces existing response headers, including Plug's default Cache-Control,
   while preserving repeated upstream headers such as Set-Cookie. Registered
-  `Plug.Conn.register_before_send/2` callbacks still run.
+  `Plug.Conn.register_before_send/2` callbacks still run. Headers set by earlier
+  plugs, such as request IDs and CORS headers, are replaced too; restore those
+  headers in a `Plug.Conn.register_before_send/2` callback to retain them.
 
   If you change the buffered body, update its representation headers (such as
   Content-Length and Content-Encoding) before sending it.
   """
-  @spec send_buffered(Plug.Conn.t(), %{
-          status: pos_integer(),
-          headers: [{String.t(), String.t()}],
-          body: binary()
-        }) :: Plug.Conn.t()
+  @spec send_buffered(Plug.Conn.t(), buffered_response()) :: Plug.Conn.t()
   def send_buffered(conn, %{status: status, headers: headers, body: body}) do
     conn
     |> Headers.put_response_headers(headers)

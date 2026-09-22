@@ -231,7 +231,9 @@ point, `request/3` leaves halting the conn and sending buffered/error results to
 the caller. `ReverseIt.send_buffered/2` sends a buffered result while preserving
 repeated headers such as Set-Cookie and replacing Plug's default response
 headers. It runs registered before-send callbacks and leaves halting to the
-caller. If you rewrite the body, update its representation headers before
+caller. Headers set by earlier plugs, such as request IDs and CORS headers,
+are also replaced; restore them in a `Plug.Conn.register_before_send/2` callback
+if needed. If you rewrite the body, update its representation headers before
 sending it.
 
 The required `handle_headers/3` callback chooses streaming, finite buffering, or
@@ -266,7 +268,8 @@ For quiet SSE or long-polling responses, `handle_headers/3` can return
 `{:stream, headers, state, commit: :headers}` to send the validated status and
 headers immediately. This avoids waiting for a body chunk before a load balancer
 sees the response. With this opt-in, even a first-chunk rejection aborts the
-response because its headers have already been sent.
+response because its headers have already been sent. Returning an empty options
+list or `commit: :output` explicitly selects the default deferred behavior.
 
 After commitment, transport or callback-reported failures abort the downstream
 stream rather than completing a truncated body. Never catch and convert such an

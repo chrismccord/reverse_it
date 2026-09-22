@@ -14,8 +14,14 @@ defmodule ReverseIt.TestResponseHandler do
       end
 
     case {result, Map.get(state, :commit)} do
-      {{:stream, headers, state}, :headers} -> {:stream, headers, state, commit: :headers}
-      _ -> result
+      {{:stream, headers, state}, commit} when commit in [:headers, :output] ->
+        {:stream, headers, state, commit: commit}
+
+      {{:stream, headers, state}, []} ->
+        {:stream, headers, state, []}
+
+      _ ->
+        result
     end
   end
 

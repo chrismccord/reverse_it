@@ -26,8 +26,10 @@ resource limits; review the upgrade notes before deploying.
 - HTTP proxy error logs now use `Failed to proxy HTTP response` with either
   `(before commitment)` or `(after commitment)`, replacing messages such as
   `Failed to proxy response`. Update log-based alerts that match the old text.
-  Client validation rejections remain silent. The new `request/3` API returns
-  pre-commit errors without logging; callers choose how to log returned errors.
+  Client size and header validation rejections remain silent. Request-body read
+  failures, such as client disconnects, are now silent too; these previously
+  could log at error level. The new `request/3` API returns pre-commit errors
+  without logging; callers choose how to log returned errors.
 
 ### HTTP extension API
 
