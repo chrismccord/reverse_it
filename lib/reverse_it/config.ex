@@ -16,6 +16,9 @@ defmodule ReverseIt.Config do
     :host,
     :port,
     :unix_socket,
+    :connect_ip,
+    :request_body,
+    :response_handler,
     :upstream_connection,
     :path_prefix,
     :strip_path,
@@ -60,6 +63,9 @@ defmodule ReverseIt.Config do
           host: String.t(),
           port: non_neg_integer(),
           unix_socket: String.t() | nil,
+          connect_ip: :inet.ip_address() | nil,
+          request_body: binary() | nil,
+          response_handler: {module(), term()} | nil,
           upstream_connection: :pooled | :one_shot,
           path_prefix: String.t() | nil,
           strip_path: String.t() | nil,
@@ -105,6 +111,9 @@ defmodule ReverseIt.Config do
 
     * `:name` - Name of the Finch pool to use (required)
     * `:backend` - Backend URL (required). Can be http://, https://, ws://, or wss://
+    * `:connect_ip` - Vetted IPv4/IPv6 tuple to dial while retaining the backend hostname for TLS and HTTP; requires `:one_shot` and cannot be combined with `:unix_socket`
+    * `:request_body` - Already-read binary request body; `nil` reads from the conn (default). Size limits still apply and Content-Length is recalculated.
+    * `:response_handler` - `{module, initial_state}` implementing `ReverseIt.ResponseHandler` for HTTP response inspection, transformation, or bounded buffering (default: `nil`)
     * `:unix_socket` - Connect to this Unix-domain socket instead of the backend host/port
     * `:upstream_connection` - `:pooled` or `:one_shot` (default: `:pooled`)
     * `:strip_path` - Path prefix to strip from incoming requests before proxying
@@ -231,13 +240,17 @@ defmodule ReverseIt.Config do
         send_timeout: config.upstream_send_timeout,
         send_timeout_close: true
       ]
-      |> maybe_enable_ipv6(config.host)
+      |> maybe_enable_ipv6(config.connect_ip || config.host)
 
     if config.scheme in [:https, :wss] and config.verify_tls == false do
       Keyword.put(opts, :verify, :verify_none)
     else
       opts
     end
+  end
+
+  defp maybe_enable_ipv6(opts, address) when is_tuple(address) do
+    if tuple_size(address) == 8, do: Keyword.put(opts, :inet6, true), else: opts
   end
 
   defp maybe_enable_ipv6(opts, host) do
@@ -264,6 +277,9 @@ defmodule ReverseIt.Config do
              host: host,
              port: port,
              unix_socket: Keyword.get(opts, :unix_socket),
+             connect_ip: Keyword.get(opts, :connect_ip),
+             request_body: Keyword.get(opts, :request_body),
+             response_handler: Keyword.get(opts, :response_handler),
              upstream_connection: Keyword.get(opts, :upstream_connection, :pooled),
              path_prefix: normalize_path(uri.path),
              strip_path: normalize_path(opts[:strip_path]),
@@ -406,6 +422,21 @@ defmodule ReverseIt.Config do
 
   defp validate_connection_config(%__MODULE__{} = config) do
     cond do
+      not is_nil(config.request_body) and not is_binary(config.request_body) ->
+        {:error, "request_body must be a binary or nil"}
+
+      not valid_response_handler?(config.response_handler) ->
+        {:error, "response_handler must be {module, state} implementing handle_headers/3"}
+
+      not is_nil(config.connect_ip) and not valid_ip?(config.connect_ip) ->
+        {:error, "connect_ip must be an IPv4 or IPv6 address tuple"}
+
+      not is_nil(config.connect_ip) and not is_nil(config.unix_socket) ->
+        {:error, "connect_ip and unix_socket are mutually exclusive"}
+
+      not is_nil(config.connect_ip) and config.upstream_connection != :one_shot ->
+        {:error, "connect_ip requires upstream_connection: :one_shot"}
+
       config.upstream_connection not in [:pooled, :one_shot] ->
         {:error, "upstream_connection must be :pooled or :one_shot"}
 
@@ -426,6 +457,21 @@ defmodule ReverseIt.Config do
         :ok
     end
   end
+
+  defp valid_ip?(address) when is_tuple(address) and tuple_size(address) in [4, 8] do
+    max = if tuple_size(address) == 4, do: 255, else: 65_535
+    address |> Tuple.to_list() |> Enum.all?(&(is_integer(&1) and &1 >= 0 and &1 <= max))
+  end
+
+  defp valid_ip?(_), do: false
+
+  defp valid_response_handler?(nil), do: true
+
+  defp valid_response_handler?({module, _state}) when is_atom(module) do
+    Code.ensure_loaded?(module) and function_exported?(module, :handle_headers, 3)
+  end
+
+  defp valid_response_handler?(_), do: false
 
   defp normalize_config_headers(headers) do
     Enum.reduce_while(headers, {:ok, []}, fn

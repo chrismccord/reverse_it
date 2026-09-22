@@ -24,6 +24,23 @@ resource limits; review the upgrade notes before deploying.
   can compress a length-delimited response stream without updating its declared
   `Content-Length`.
 
+### HTTP extension API
+
+- Add `ReverseIt.request/2`, returning unsent buffered responses and pre-commit
+  errors for application-owned processing and retry decisions.
+- Add `response_handler: {module, state}` with header selection, streaming data,
+  end-of-stream, and lifecycle callbacks shared by pooled and one-shot HTTP.
+  Buffers require finite limits; transformed streams discard upstream length
+  headers and enforce the response byte limit on received and emitted data.
+- Add `request_body` for already-read binary bodies, retaining body limits and
+  recalculating request framing.
+- Add `connect_ip` for vetted IPv4/IPv6 destinations while retaining the backend
+  hostname for TLS verification, SNI, and HTTP authority. Initially restricted to
+  one-shot connections so pins cannot be bypassed through connection-pool reuse.
+- Close direct upstream sockets even if a response handler raises or a committed
+  downstream stream is aborted. Handled requests disable automatic header retries;
+  applications own retries before downstream commitment.
+
 ### HTTP fixes
 
 - Preserve backend `Content-Length` on streamed downloads in pooled and one-shot

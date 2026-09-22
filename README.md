@@ -155,6 +155,113 @@ scope "/api" do
 end
 ```
 
+## Application-controlled HTTP responses
+
+Use `ReverseIt.request/2` when your application needs to inspect or transform
+response bytes, buffer an error before deciding whether to retry, or forward a
+request body it has already read and validated. Ordinary `ReverseIt.call/2`
+continues to act as a Plug and sends the response automatically.
+
+```elixir
+defmodule MyApp.ResponseHandler do
+  @behaviour ReverseIt.ResponseHandler
+
+  @impl true
+  def handle_headers(status, _headers, state) when status >= 400 do
+    {:buffer, 1_048_576, state}
+  end
+
+  def handle_headers(_status, headers, state) do
+    {:stream, headers, state}
+  end
+
+  @impl true
+  def handle_data(bytes, state) do
+    {:ok, bytes, %{state | bytes: state.bytes + byte_size(bytes)}}
+  end
+end
+
+config = ReverseIt.init(
+  name: MyApp.ReverseProxy,
+  backend: "https://api.example.com",
+  request_body: validated_body,
+  response_handler: {MyApp.ResponseHandler, %{bytes: 0}},
+  forwarded_headers: false,
+  protocols: [:http1]
+)
+
+case ReverseIt.request(conn, config) do
+  {:ok, conn, _state} ->
+    # The response has already been sent/streamed.
+    Plug.Conn.halt(conn)
+
+  {:buffered, response, conn, _state} ->
+    # Still unsent: inspect response.status/body, rewrite it, or decide whether
+    # this operation is safe to retry using the same explicitly supplied body.
+    conn
+    |> Plug.Conn.put_resp_content_type("application/json")
+    |> Plug.Conn.send_resp(response.status, response.body)
+    |> Plug.Conn.halt()
+
+  {:error, _reason, conn, _state} ->
+    # Only pre-commit failures return here. Do not expose raw error details.
+    conn |> Plug.Conn.send_resp(502, "Upstream unavailable") |> Plug.Conn.halt()
+end
+```
+
+`request_body` accepts a binary, including `""`; `nil` keeps normal conn body
+reading/streaming. Explicit bodies still obey `max_request_body_size`, and their
+Content-Length is recalculated. Build this config per request rather than storing
+request bodies or per-request handler state in module attributes.
+
+The required `handle_headers/3` callback chooses streaming, finite buffering, or
+`{:error, reason, state}` before commitment. Optional `handle_data/2` and
+`handle_end/1` return `{:ok, iodata, state}` or `{:error, reason, state}`. Data
+callbacks receive arbitrary transport chunks, not complete JSON/SSE events.
+Applications must bound their own parser state. Buffered responses skip data/end
+callbacks and return the original bytes for caller-owned processing.
+
+Optional `terminate/2` receives `:ok`, `:buffered`, or `{:error, reason}` and the
+final state. Downstream write failures use `{:downstream, reason}`. Callback
+exceptions propagate; `terminate/2` is not guaranteed for programming errors or
+process termination. It should be a lightweight observer and must not raise.
+
+The same callbacks run for pooled and one-shot HTTP. Handled streams drop the
+upstream Content-Length, and both received and emitted bytes obey
+`max_response_body_size`. Buffering additionally requires its own finite limit.
+Header filtering/validation remains enforced before and after header callbacks.
+The proxy does not decompress responses; handlers can reject unsupported encodings
+before sending anything. HTTP/1 is recommended for synchronous backpressure.
+
+After commitment, transport or callback-reported failures abort the downstream
+stream rather than completing a truncated body. Never catch and convert such an
+exit into a successful response. Configuring a handler disables automatic
+`response_header_retries`; retry decisions remain with the caller. WebSocket
+upgrades are rejected by `request/2`; the existing Plug WebSocket API is unchanged.
+
+### Pinning an upstream address
+
+Keep the logical hostname in `backend` and supply the already-vetted IP separately:
+
+```elixir
+ReverseIt.init(
+  name: MyApp.ReverseProxy,
+  backend: "https://api.example.com/v1",
+  connect_ip: {203, 0, 113, 10},
+  upstream_connection: :one_shot,
+  protocols: [:http1]
+)
+```
+
+No DNS resolution occurs when dialing this address. TLS certificate verification,
+SNI, and the default Host header still use the backend hostname. IPv4 and IPv6
+address tuples are supported. The application remains responsible for resolving
+and authorizing the destination; this option itself does not implement SSRF policy.
+
+Pinned addresses require one-shot connections and cannot be combined with
+`unix_socket`. This avoids reusing a pooled connection across different IP/hostname
+identities. The shared direct transport also supports pinning WebSocket upstreams.
+
 ## Configuration Options
 
 ### Supervisor Options (when starting ReverseIt)

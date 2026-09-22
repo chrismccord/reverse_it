@@ -7,7 +7,7 @@ defmodule ReverseIt.Upstream do
     {address, port} =
       case config.unix_socket do
         path when is_binary(path) -> {{:local, path}, 0}
-        nil -> {config.host, config.port}
+        nil -> {config.connect_ip || config.host, config.port}
       end
 
     Mint.HTTP.connect(Config.http_scheme(config), address, port,

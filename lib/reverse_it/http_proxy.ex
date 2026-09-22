@@ -5,23 +5,44 @@ defmodule ReverseIt.HTTPProxy do
   """
 
   require Logger
-  alias ReverseIt.{Config, Headers, Upstream}
+  alias ReverseIt.{Config, Headers, ResponseStream, Upstream}
 
   @doc """
   Proxies an HTTP request to the backend.
   """
   @spec proxy(Plug.Conn.t(), Config.t()) :: Plug.Conn.t()
   def proxy(conn, %Config{} = config) do
+    case request(conn, config) do
+      {:ok, conn, _state} ->
+        conn
+
+      {:buffered, response, conn, _state} ->
+        conn
+        |> Headers.put_response_headers(response.headers)
+        |> Plug.Conn.send_resp(response.status, response.body)
+
+      {:error, reason, conn, _state} ->
+        send_proxy_error(conn, config, reason)
+    end
+  end
+
+  @doc false
+  def request(conn, %Config{} = config) do
     with :ok <- validate_content_length(conn, config) do
       url = build_url(config, conn.request_path, conn.query_string)
       headers = Headers.request_headers(conn, config)
 
-      case Plug.Conn.read_body(conn, first_body_read_opts(config)) do
+      headers =
+        if is_binary(config.request_body),
+          do: Enum.reject(headers, fn {name, _} -> name == "content-length" end),
+          else: headers
+
+      case read_request_body(conn, config) do
         {:ok, body, conn} ->
           if within_request_body_limit?(byte_size(body), config) do
             proxy_buffered_request(conn, url, headers, body, config)
           else
-            send_error_response(conn, 413, "Payload Too Large")
+            request_error(conn, config, :request_body_too_large)
           end
 
         {:more, first_chunk, conn} ->
@@ -33,22 +54,31 @@ defmodule ReverseIt.HTTPProxy do
               :one_shot -> stream_request_with_mint(conn, url, headers, first_chunk, config)
             end
           else
-            send_error_response(conn, 413, "Payload Too Large")
+            request_error(conn, config, :request_body_too_large)
           end
 
         {:error, reason} ->
           Logger.error("Failed to read request body: #{inspect(reason)}")
-          send_error_response(conn, 400, "Bad Request")
+          request_error(conn, config, {:request_body_read_failed, reason})
       end
     else
       {:error, :request_body_too_large} ->
-        send_error_response(conn, 413, "Payload Too Large")
+        request_error(conn, config, :request_body_too_large)
 
       {:error, :invalid_content_length} ->
-        send_error_response(conn, 400, "Bad Request")
+        request_error(conn, config, :invalid_content_length)
     end
   end
 
+  defp read_request_body(conn, %{request_body: body}) when is_binary(body), do: {:ok, body, conn}
+
+  defp read_request_body(conn, config),
+    do: Plug.Conn.read_body(conn, first_body_read_opts(config))
+
+  defp request_error(conn, config, reason),
+    do: ResponseStream.fail(ResponseStream.new(conn, config), reason)
+
+  defp validate_content_length(_conn, %{request_body: body}) when is_binary(body), do: :ok
   defp validate_content_length(_conn, %{max_request_body_size: :infinity}), do: :ok
 
   defp validate_content_length(conn, config) do
@@ -114,186 +144,34 @@ defmodule ReverseIt.HTTPProxy do
     do_stream_response_with_finch(request, acc, retries_left)
   end
 
-  defp response_acc(conn, config) do
-    %{
-      conn: conn,
-      config: config,
-      method: conn.method,
-      status: nil,
-      headers: [],
-      sent?: false,
-      response_bytes: 0,
-      error: nil
-    }
-  end
+  defp response_acc(conn, config), do: ResponseStream.new(conn, config)
 
   defp do_stream_response_with_finch(request, acc, retries_left) do
     config = acc.config
+    opts = [pool_timeout: config.pool_timeout, receive_timeout: config.upstream_idle_timeout]
 
-    opts = [
-      pool_timeout: config.pool_timeout,
-      receive_timeout: config.upstream_idle_timeout
-    ]
+    case Finch.stream_while(request, config.name, acc, &ResponseStream.event/2, opts) do
+      {:ok, acc} ->
+        ResponseStream.finish(acc)
 
-    case Finch.stream_while(request, config.name, acc, &handle_finch_response/2, opts) do
-      {:ok, %{sent?: false, error: nil} = acc} ->
-        send_unsent_response(acc)
-
-      {:ok, %{sent?: true, error: nil, conn: conn}} ->
-        conn
-
-      {:ok, %{sent?: true, error: reason}} ->
-        abort_downstream!(reason)
-
-      {:ok, %{sent?: false, error: reason, conn: conn, config: config}} ->
-        send_proxy_error(conn, config, reason)
-
-      {:error, reason, %{sent?: false, conn: conn, config: config}} ->
-        if retry_response_headers?(conn.method, reason, retries_left) do
-          stream_response_with_finch(conn, request, config, retries_left - 1)
+      {:error, reason, acc} ->
+        if is_nil(config.response_handler) and not acc.sent? and
+             retry_response_headers?(acc.method, reason, retries_left) do
+          stream_response_with_finch(acc.conn, request, config, retries_left - 1)
         else
-          Logger.error("Failed to proxy request: #{inspect(reason)}")
-          send_configured_bad_gateway(conn, config)
-        end
-
-      {:error, reason, %{sent?: true}} ->
-        Logger.error("Upstream stream failed after response started: #{inspect(reason)}")
-        abort_downstream!(reason)
-    end
-  end
-
-  defp handle_finch_response({:status, status}, acc), do: {:cont, %{acc | status: status}}
-
-  defp handle_finch_response({:headers, headers}, acc) do
-    acc = %{acc | headers: acc.headers ++ headers}
-
-    cond do
-      informational_response?(acc.status) ->
-        {:cont, %{acc | status: nil, headers: []}}
-
-      not send_body?(acc.method, acc.status) ->
-        send_empty_response(acc)
-
-      response_content_length_exceeds?(acc.headers, acc.config) ->
-        {:halt, %{acc | error: :response_body_too_large}}
-
-      acc.config.max_response_body_size == :infinity ->
-        send_chunked_headers(acc)
-
-      true ->
-        {:cont, acc}
-    end
-  end
-
-  defp handle_finch_response({:data, data}, acc) do
-    acc = maybe_count_response_bytes(acc, byte_size(data))
-
-    cond do
-      acc.error ->
-        {:halt, acc}
-
-      not send_body?(acc.method, acc.status) ->
-        {:cont, acc}
-
-      true ->
-        with {:cont, acc} <- ensure_chunked_response_started(acc) do
-          case Plug.Conn.chunk(acc.conn, data) do
-            {:ok, conn} -> {:cont, %{acc | conn: conn}}
-            {:error, reason} -> {:halt, %{acc | error: reason}}
-          end
+          ResponseStream.fail(acc, acc.error || reason)
         end
     end
   end
 
-  defp handle_finch_response({:trailers, _trailers}, acc), do: {:cont, acc}
+  defp send_proxy_error(conn, _config, :invalid_content_length),
+    do: send_error_response(conn, 400, "Bad Request")
 
-  defp response_content_length_exceeds?(_headers, %{max_response_body_size: :infinity}), do: false
+  defp send_proxy_error(conn, _config, {:response_headers, _reason}),
+    do: send_error_response(conn, 504, "Gateway Timeout")
 
-  defp response_content_length_exceeds?(headers, config) do
-    Enum.any?(headers, fn
-      {name, value} ->
-        String.downcase(name) == "content-length" and
-          match?({length, ""} when length > config.max_response_body_size, Integer.parse(value))
-    end)
-  end
-
-  defp maybe_count_response_bytes(acc, bytes) do
-    response_bytes = acc.response_bytes + bytes
-
-    if acc.config.max_response_body_size != :infinity and
-         response_bytes > acc.config.max_response_body_size do
-      %{acc | response_bytes: response_bytes, error: :response_body_too_large}
-    else
-      %{acc | response_bytes: response_bytes}
-    end
-  end
-
-  defp send_unsent_response(%{status: nil, conn: conn, config: config}) do
-    Logger.error("Backend closed without a response status")
-    send_configured_bad_gateway(conn, config)
-  end
-
-  defp send_unsent_response(acc) do
-    result =
-      if send_body?(acc.method, acc.status) do
-        send_chunked_headers(acc)
-      else
-        send_empty_response(acc)
-      end
-
-    case result do
-      {:cont, %{conn: conn}} ->
-        conn
-
-      {:halt, %{conn: conn, config: config, error: reason}} ->
-        send_proxy_error(conn, config, reason)
-    end
-  end
-
-  defp ensure_chunked_response_started(%{sent?: true} = acc), do: {:cont, acc}
-  defp ensure_chunked_response_started(acc), do: send_chunked_headers(acc)
-
-  defp send_chunked_headers(%{sent?: true} = acc), do: {:cont, acc}
-
-  defp send_chunked_headers(%{status: status} = acc) when is_integer(status) do
-    with {:ok, headers} <- Headers.response_headers(acc.headers, acc.config) do
-      # Plug streams a length-delimited body when Content-Length is present.
-      conn =
-        acc.conn
-        |> Headers.put_response_headers(headers)
-        |> Plug.Conn.send_chunked(status)
-
-      {:cont, %{acc | conn: conn, sent?: true}}
-    else
-      {:error, reason} -> {:halt, %{acc | error: reason}}
-    end
-  end
-
-  defp send_chunked_headers(acc), do: {:halt, %{acc | error: :missing_response_status}}
-
-  defp send_empty_response(%{sent?: true} = acc), do: {:cont, acc}
-
-  defp send_empty_response(%{status: status} = acc) when is_integer(status) do
-    mode = if acc.method == "HEAD", do: :identity, else: :bodyless
-
-    with {:ok, headers} <- Headers.response_headers(acc.headers, acc.config, mode: mode) do
-      conn =
-        acc.conn
-        |> Headers.put_response_headers(headers)
-        |> Plug.Conn.send_resp(status, "")
-
-      {:cont, %{acc | conn: conn, sent?: true}}
-    else
-      {:error, reason} -> {:halt, %{acc | error: reason}}
-    end
-  end
-
-  defp send_empty_response(acc), do: {:halt, %{acc | error: :missing_response_status}}
-
-  defp send_body?("HEAD", _status), do: false
-  defp send_body?(_method, status) when status in 100..199, do: false
-  defp send_body?(_method, status) when status in [204, 304], do: false
-  defp send_body?(_method, _status), do: true
+  defp send_proxy_error(conn, _config, :response_buffer_too_large),
+    do: send_error_response(conn, 502, "Bad Gateway: Response buffer too large")
 
   defp send_proxy_error(conn, _config, :response_body_too_large) do
     send_error_response(conn, 502, "Bad Gateway: Response too large")
@@ -397,13 +275,15 @@ defmodule ReverseIt.HTTPProxy do
 
     case Upstream.connect(config, mode: :passive) do
       {:ok, mint_conn} ->
-        result = do_stream_request(conn, mint_conn, path, headers, first_chunk, config)
-        Mint.HTTP.close(mint_conn)
-        result
+        try do
+          do_stream_request(conn, mint_conn, path, headers, first_chunk, config)
+        after
+          Mint.HTTP.close(mint_conn)
+        end
 
       {:error, reason} ->
         Logger.error("Failed to connect to backend for streaming: #{inspect(reason)}")
-        send_configured_bad_gateway(conn, config)
+        request_error(conn, config, reason)
     end
   end
 
@@ -414,22 +294,22 @@ defmodule ReverseIt.HTTPProxy do
 
     case Upstream.connect(config, mode: :passive) do
       {:ok, mint_conn} ->
-        result =
+        try do
           case Mint.HTTP.request(mint_conn, conn.method, path, headers, body) do
             {:ok, mint_conn, ref} ->
               stream_response_with_mint(conn, mint_conn, ref, config)
 
             {:error, _mint_conn, reason} ->
               Logger.error("Failed to send one-shot request: #{inspect(reason)}")
-              send_configured_bad_gateway(conn, config)
+              request_error(conn, config, reason)
           end
-
-        _ = Mint.HTTP.close(mint_conn)
-        result
+        after
+          Mint.HTTP.close(mint_conn)
+        end
 
       {:error, reason} ->
         Logger.error("Failed to connect one-shot upstream: #{inspect(reason)}")
-        send_configured_bad_gateway(conn, config)
+        request_error(conn, config, reason)
     end
   end
 
@@ -444,16 +324,16 @@ defmodule ReverseIt.HTTPProxy do
           stream_response_with_mint(plug_conn, mint_conn, ref, config)
         else
           {:error, :request_body_too_large} ->
-            send_error_response(conn, 413, "Payload Too Large")
+            request_error(conn, config, :request_body_too_large)
 
           {:error, reason} ->
             Logger.error("Failed to stream request body: #{inspect(reason)}")
-            send_configured_bad_gateway(conn, config)
+            request_error(conn, config, reason)
         end
 
       {:error, _mint_conn, reason} ->
         Logger.error("Failed to start streaming request: #{inspect(reason)}")
-        send_configured_bad_gateway(conn, config)
+        request_error(conn, config, reason)
     end
   end
 
@@ -503,212 +383,54 @@ defmodule ReverseIt.HTTPProxy do
     end
   end
 
-  defp stream_response_with_mint(plug_conn, mint_conn, ref, config) do
-    case receive_response_headers(mint_conn, ref, config.response_header_timeout, nil, [], config) do
-      {:ok, mint_conn, status, headers, remaining_responses} ->
-        cond do
-          not send_body?(plug_conn.method, status) ->
-            send_empty_mint_response(plug_conn, status, headers, config)
-
-          response_content_length_exceeds?(headers, config) ->
-            send_error_response(plug_conn, 502, "Bad Gateway: Response too large")
-
-          true ->
-            stream_mint_response_body(
-              plug_conn,
-              mint_conn,
-              ref,
-              status,
-              headers,
-              remaining_responses,
-              config
-            )
-        end
-
-      {:error, reason} ->
-        Logger.error("Failed to receive response headers: #{inspect(reason)}")
-        send_error_response(plug_conn, 504, "Gateway Timeout")
-    end
+  defp stream_response_with_mint(conn, mint_conn, ref, config) do
+    receive_response(response_acc(conn, config), mint_conn, ref)
   end
 
-  defp send_empty_mint_response(plug_conn, status, headers, config) do
-    mode = if plug_conn.method == "HEAD", do: :identity, else: :bodyless
+  defp receive_response(acc, mint_conn, ref) do
+    timeout =
+      if not acc.headers_received?,
+        do: acc.config.response_header_timeout,
+        else: acc.config.upstream_idle_timeout
 
-    case Headers.response_headers(headers, config, mode: mode) do
-      {:ok, headers} ->
-        plug_conn
-        |> Headers.put_response_headers(headers)
-        |> Plug.Conn.send_resp(status, "")
-
-      {:error, reason} ->
-        send_proxy_error(plug_conn, config, reason)
-    end
-  end
-
-  defp stream_mint_response_body(
-         plug_conn,
-         mint_conn,
-         ref,
-         status,
-         headers,
-         remaining_responses,
-         config
-       ) do
-    case Headers.response_headers(headers, config) do
-      {:ok, headers} ->
-        plug_conn =
-          plug_conn
-          |> Headers.put_response_headers(headers)
-          |> Plug.Conn.send_chunked(status)
-
-        acc = %{conn: plug_conn, bytes: 0, config: config, error: nil}
-
-        case process_body_responses(acc, remaining_responses, ref) do
-          {:continue, acc} -> receive_response_body(acc, mint_conn, ref, config)
-          {:done, acc} -> acc.conn
-          {:error, reason, acc} -> finish_mint_stream_error(reason, acc)
-        end
-
-      {:error, reason} ->
-        send_proxy_error(plug_conn, config, reason)
-    end
-  end
-
-  defp receive_response_headers(mint_conn, ref, timeout, status, headers, config) do
     case Mint.HTTP.recv(mint_conn, 0, timeout) do
       {:ok, mint_conn, responses} ->
-        case process_header_responses(responses, ref, status, headers, config) do
-          {:continue, status, headers} ->
-            receive_response_headers(mint_conn, ref, timeout, status, headers, config)
-
-          {:headers_complete, status, headers, remaining_responses} ->
-            {:ok, mint_conn, status, headers, remaining_responses}
-
-          {:error, reason} ->
-            {:error, reason}
+        case process_responses(acc, responses, ref) do
+          {:cont, acc} -> receive_response(acc, mint_conn, ref)
+          {:done, acc} -> ResponseStream.finish(acc)
+          {:halt, acc} -> ResponseStream.fail(acc, acc.error)
         end
 
-      {:error, _mint_conn, reason, _responses} ->
-        {:error, reason}
-    end
-  end
-
-  defp process_header_responses([], _ref, status, headers, _config) do
-    {:continue, status, headers}
-  end
-
-  defp process_header_responses([response | rest], ref, status, headers, config) do
-    case response do
-      {:status, ^ref, status_code} ->
-        process_header_responses(rest, ref, status_code, headers, config)
-
-      {:headers, ^ref, new_headers} ->
-        headers = headers ++ new_headers
-
-        if header_block_within_limit?(headers, config) do
-          cond do
-            informational_response?(status) ->
-              process_header_responses(rest, ref, nil, [], config)
-
-            status != nil ->
-              {:headers_complete, status, headers, rest}
-
-            true ->
-              process_header_responses(rest, ref, status, headers, config)
-          end
-        else
-          {:error, :response_headers_too_large}
+      {:error, _mint_conn, reason, responses} ->
+        case process_responses(acc, responses, ref) do
+          {:done, acc} -> ResponseStream.finish(acc)
+          {_, acc} -> ResponseStream.fail(acc, acc.error || mint_receive_error(acc, reason))
         end
-
-      {:data, ^ref, _data} when status != nil ->
-        {:headers_complete, status, headers, [response | rest]}
-
-      {:error, ^ref, reason} ->
-        {:error, reason}
-
-      _other ->
-        process_header_responses(rest, ref, status, headers, config)
     end
   end
 
-  defp header_block_within_limit?(headers, config) do
-    Enum.reduce(headers, 0, fn {name, value}, total ->
-      total + byte_size(name) + 2 + byte_size(value)
-    end) <= config.max_response_header_bytes
-  end
+  defp process_responses(acc, [], _ref), do: {:cont, acc}
+  defp process_responses(acc, [{:done, ref} | _], ref), do: {:done, acc}
 
-  defp informational_response?(status), do: status in 100..199 and status != 101
+  defp process_responses(acc, [{:error, ref, reason} | _], ref),
+    do: {:halt, %{acc | error: mint_receive_error(acc, reason)}}
 
-  defp receive_response_body(acc, mint_conn, ref, config) do
-    case Mint.HTTP.recv(mint_conn, 0, config.upstream_idle_timeout) do
-      {:ok, mint_conn, responses} ->
-        case process_body_responses(acc, responses, ref) do
-          {:continue, acc} -> receive_response_body(acc, mint_conn, ref, config)
-          {:done, acc} -> acc.conn
-          {:error, reason, acc} -> finish_mint_stream_error(reason, acc)
-        end
-
-      {:error, _mint_conn, :timeout, _responses} ->
-        Logger.error("Timeout receiving response body")
-        abort_downstream!(:timeout)
-
-      {:error, _mint_conn, reason, _responses} ->
-        Logger.error("Mint stream error: #{inspect(reason)}")
-        abort_downstream!(reason)
+  defp process_responses(acc, [{kind, ref, value} | rest], ref)
+       when kind in [:status, :headers, :data, :trailers] do
+    case ResponseStream.event({kind, value}, acc) do
+      {:cont, acc} -> process_responses(acc, rest, ref)
+      {:halt, acc} -> {:halt, acc}
     end
   end
 
-  defp process_body_responses(acc, [], _ref), do: {:continue, acc}
+  defp process_responses(acc, [_ | rest], ref), do: process_responses(acc, rest, ref)
 
-  defp process_body_responses(acc, [response | rest], ref) do
-    case response do
-      {:data, ^ref, data} ->
-        acc = maybe_count_mint_response_bytes(acc, byte_size(data))
+  # Keep the existing Plug response for direct upstream failures while waiting
+  # for headers. request/2 also exposes the phase to application error handlers.
+  defp mint_receive_error(%{headers_received?: false}, reason),
+    do: {:response_headers, reason}
 
-        cond do
-          acc.error ->
-            {:error, acc.error, acc}
-
-          true ->
-            case Plug.Conn.chunk(acc.conn, data) do
-              {:ok, conn} -> process_body_responses(%{acc | conn: conn}, rest, ref)
-              {:error, reason} -> {:error, reason, acc}
-            end
-        end
-
-      {:done, ^ref} ->
-        {:done, acc}
-
-      {:error, ^ref, reason} ->
-        {:error, reason, acc}
-
-      _other ->
-        process_body_responses(acc, rest, ref)
-    end
-  end
-
-  defp maybe_count_mint_response_bytes(acc, bytes) do
-    total = acc.bytes + bytes
-
-    if acc.config.max_response_body_size != :infinity and
-         total > acc.config.max_response_body_size do
-      %{acc | bytes: total, error: :response_body_too_large}
-    else
-      %{acc | bytes: total}
-    end
-  end
-
-  defp finish_mint_stream_error(:response_body_too_large, _acc) do
-    Logger.error("Backend response exceeded max_response_body_size")
-    abort_downstream!(:response_body_too_large)
-  end
-
-  defp finish_mint_stream_error(reason, _acc) do
-    Logger.error("Error streaming response body: #{inspect(reason)}")
-    abort_downstream!(reason)
-  end
-
-  defp abort_downstream!(reason), do: exit({:upstream_stream_failed, reason})
+  defp mint_receive_error(_acc, reason), do: reason
 
   defp retry_response_headers?(method, %Mint.TransportError{reason: reason}, retries_left)
        when method in ["GET", "HEAD"] and retries_left > 0 and

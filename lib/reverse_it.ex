@@ -119,6 +119,9 @@ defmodule ReverseIt do
 
     * `:name` (required) - Name of the Finch pool to use
     * `:backend` (required) - Backend URL (http://, https://, ws://, or wss://)
+    * `:connect_ip` - Vetted IPv4/IPv6 tuple to dial while retaining the backend hostname for TLS and HTTP; requires `:one_shot` and cannot be combined with `:unix_socket`
+    * `:request_body` - Already-read binary request body; `nil` reads from the conn (default). Size limits still apply and Content-Length is recalculated.
+    * `:response_handler` - `{module, initial_state}` implementing `ReverseIt.ResponseHandler` for HTTP response inspection, transformation, or bounded buffering (default: `nil`)
     * `:unix_socket` - Connect through this Unix-domain socket instead of the backend host/port
     * `:upstream_connection` - `:pooled` or `:one_shot` (default: `:pooled`)
     * `:strip_path` - Path prefix to strip from incoming requests before proxying
@@ -325,6 +328,41 @@ defmodule ReverseIt do
 
     # Ensure the connection is halted after proxying
     Plug.Conn.halt(conn)
+  end
+
+  @doc """
+  Proxies HTTP with caller-owned response handling, without halting the conn.
+
+  Returns `{:ok, conn, handler_state}` for a sent/streamed response,
+  `{:buffered, %{status: status, headers: headers, body: body}, conn, handler_state}`
+  for an unsent buffered response, or `{:error, reason, conn, handler_state}`
+  for a failure before commitment. After commitment failures exit the request
+  process to abort the downstream response. WebSocket upgrades are rejected.
+
+  Set `request_body` in the config to forward bytes already read and validated
+  by the caller, and `response_handler: {module, state}` to choose buffering or
+  stream processing. See `ReverseIt.ResponseHandler`. Buffered/error results
+  leave the response unsent so the caller can retry or send its own response.
+  Only replay explicitly supplied bodies; the original conn body is consumed.
+  """
+  @spec request(Plug.Conn.t(), Config.t()) ::
+          {:ok, Plug.Conn.t(), term()}
+          | {:buffered, map(), Plug.Conn.t(), term()}
+          | {:error, term(), Plug.Conn.t(), term()}
+  def request(conn, %Config{} = config) do
+    with :ok <- Headers.validate_client_request(conn, config),
+         false <- websocket_upgrade?(conn) do
+      HTTPProxy.request(conn, config)
+    else
+      true ->
+        ReverseIt.ResponseStream.fail(
+          ReverseIt.ResponseStream.new(conn, config),
+          :websocket_not_supported
+        )
+
+      {:error, reason} ->
+        ReverseIt.ResponseStream.fail(ReverseIt.ResponseStream.new(conn, config), reason)
+    end
   end
 
   # Private functions
