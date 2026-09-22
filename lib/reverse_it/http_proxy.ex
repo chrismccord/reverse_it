@@ -5,7 +5,7 @@ defmodule ReverseIt.HTTPProxy do
   """
 
   require Logger
-  alias ReverseIt.{Config, Headers, ResponseStream, Upstream}
+  alias ReverseIt.{Config, Headers, RequestOptions, ResponseStream, Upstream}
 
   @doc """
   Proxies an HTTP request to the backend.
@@ -16,33 +16,30 @@ defmodule ReverseIt.HTTPProxy do
       {:ok, conn, _state} ->
         conn
 
-      {:buffered, response, conn, _state} ->
-        conn
-        |> Headers.put_response_headers(response.headers)
-        |> Plug.Conn.send_resp(response.status, response.body)
-
       {:error, reason, conn, _state} ->
         send_proxy_error(conn, config, reason)
     end
   end
 
   @doc false
-  def request(conn, %Config{} = config) do
-    with :ok <- validate_content_length(conn, config) do
+  def request(conn, %Config{} = config, request_options \\ %RequestOptions{}) do
+    with :ok <- validate_content_length(conn, config, request_options) do
       url = build_url(config, conn.request_path, conn.query_string)
       headers = Headers.request_headers(conn, config)
 
       headers =
-        if is_binary(config.request_body),
-          do: Enum.reject(headers, fn {name, _} -> name == "content-length" end),
-          else: headers
+        if is_binary(request_options.request_body) do
+          Enum.reject(headers, fn {name, _} -> name == "content-length" end)
+        else
+          headers
+        end
 
-      case read_request_body(conn, config) do
+      case read_request_body(conn, config, request_options) do
         {:ok, body, conn} ->
           if within_request_body_limit?(byte_size(body), config) do
-            proxy_buffered_request(conn, url, headers, body, config)
+            proxy_buffered_request(conn, url, headers, body, config, request_options)
           else
-            request_error(conn, config, :request_body_too_large)
+            request_error(conn, config, request_options, :request_body_too_large)
           end
 
         {:more, first_chunk, conn} ->
@@ -50,38 +47,50 @@ defmodule ReverseIt.HTTPProxy do
             Logger.debug("Request body exceeds buffer threshold, using streaming proxy")
 
             case config.upstream_connection do
-              :pooled -> stream_request_with_finch(conn, url, headers, first_chunk, config)
-              :one_shot -> stream_request_with_mint(conn, url, headers, first_chunk, config)
+              :pooled ->
+                stream_request_with_finch(
+                  conn,
+                  url,
+                  headers,
+                  first_chunk,
+                  config,
+                  request_options
+                )
+
+              :one_shot ->
+                stream_request_with_mint(conn, url, headers, first_chunk, config, request_options)
             end
           else
-            request_error(conn, config, :request_body_too_large)
+            request_error(conn, config, request_options, :request_body_too_large)
           end
 
         {:error, reason} ->
-          Logger.error("Failed to read request body: #{inspect(reason)}")
-          request_error(conn, config, {:request_body_read_failed, reason})
+          request_error(conn, config, request_options, {:request_body_read_failed, reason})
       end
     else
       {:error, :request_body_too_large} ->
-        request_error(conn, config, :request_body_too_large)
+        request_error(conn, config, request_options, :request_body_too_large)
 
       {:error, :invalid_content_length} ->
-        request_error(conn, config, :invalid_content_length)
+        request_error(conn, config, request_options, :invalid_content_length)
     end
   end
 
-  defp read_request_body(conn, %{request_body: body}) when is_binary(body), do: {:ok, body, conn}
+  defp read_request_body(conn, _config, %{request_body: body}) when is_binary(body),
+    do: {:ok, body, conn}
 
-  defp read_request_body(conn, config),
+  defp read_request_body(conn, config, _options),
     do: Plug.Conn.read_body(conn, first_body_read_opts(config))
 
-  defp request_error(conn, config, reason),
-    do: ResponseStream.fail(ResponseStream.new(conn, config), reason)
+  defp request_error(conn, config, options, reason),
+    do: ResponseStream.fail(ResponseStream.new(conn, config, options.response_handler), reason)
 
-  defp validate_content_length(_conn, %{request_body: body}) when is_binary(body), do: :ok
-  defp validate_content_length(_conn, %{max_request_body_size: :infinity}), do: :ok
+  defp validate_content_length(_conn, _config, %{request_body: body}) when is_binary(body),
+    do: :ok
 
-  defp validate_content_length(conn, config) do
+  defp validate_content_length(_conn, %{max_request_body_size: :infinity}, _options), do: :ok
+
+  defp validate_content_length(conn, config, _options) do
     case Plug.Conn.get_req_header(conn, "content-length") do
       [] ->
         :ok
@@ -120,9 +129,16 @@ defmodule ReverseIt.HTTPProxy do
   defp within_request_body_limit?(_bytes, %{max_request_body_size: :infinity}), do: true
   defp within_request_body_limit?(bytes, config), do: bytes <= config.max_request_body_size
 
-  defp proxy_buffered_request(conn, url, headers, body, %{upstream_connection: :pooled} = config) do
+  defp proxy_buffered_request(
+         conn,
+         url,
+         headers,
+         body,
+         %{upstream_connection: :pooled} = config,
+         request_options
+       ) do
     request = Finch.build(conn.method, url, headers, body)
-    stream_response_with_finch(conn, request, config)
+    stream_response_with_finch(conn, request, config, request_options)
   end
 
   defp proxy_buffered_request(
@@ -130,21 +146,29 @@ defmodule ReverseIt.HTTPProxy do
          url,
          headers,
          body,
-         %{upstream_connection: :one_shot} = config
+         %{upstream_connection: :one_shot} = config,
+         request_options
        ) do
-    request_with_mint(conn, url, headers, body, config)
+    request_with_mint(conn, url, headers, body, config, request_options)
   end
 
-  defp stream_response_with_finch(conn, request, config) do
-    stream_response_with_finch(conn, request, config, config.response_header_retries)
+  defp stream_response_with_finch(conn, request, config, request_options) do
+    stream_response_with_finch(
+      conn,
+      request,
+      config,
+      request_options,
+      config.response_header_retries
+    )
   end
 
-  defp stream_response_with_finch(conn, request, config, retries_left) do
-    acc = response_acc(conn, config)
+  defp stream_response_with_finch(conn, request, config, request_options, retries_left) do
+    acc = response_acc(conn, config, request_options)
     do_stream_response_with_finch(request, acc, retries_left)
   end
 
-  defp response_acc(conn, config), do: ResponseStream.new(conn, config)
+  defp response_acc(conn, config, request_options),
+    do: ResponseStream.new(conn, config, request_options.response_handler)
 
   defp do_stream_response_with_finch(request, acc, retries_left) do
     config = acc.config
@@ -155,9 +179,15 @@ defmodule ReverseIt.HTTPProxy do
         ResponseStream.finish(acc)
 
       {:error, reason, acc} ->
-        if is_nil(config.response_handler) and not acc.sent? and
+        if is_nil(acc.handler) and not acc.sent? and
              retry_response_headers?(acc.method, reason, retries_left) do
-          stream_response_with_finch(acc.conn, request, config, retries_left - 1)
+          stream_response_with_finch(
+            acc.conn,
+            request,
+            config,
+            %RequestOptions{},
+            retries_left - 1
+          )
         else
           ResponseStream.fail(acc, acc.error || reason)
         end
@@ -193,8 +223,7 @@ defmodule ReverseIt.HTTPProxy do
     send_error_response(conn, 400, "Bad Request")
   end
 
-  defp send_proxy_error(conn, config, reason) do
-    Logger.error("Failed to proxy response: #{inspect(reason)}")
+  defp send_proxy_error(conn, config, _reason) do
     send_configured_bad_gateway(conn, config)
   end
 
@@ -218,10 +247,10 @@ defmodule ReverseIt.HTTPProxy do
     |> URI.to_string()
   end
 
-  defp stream_request_with_finch(conn, url, headers, first_chunk, config) do
+  defp stream_request_with_finch(conn, url, headers, first_chunk, config, request_options) do
     acc =
       conn
-      |> response_acc(config)
+      |> response_acc(config, request_options)
       |> Map.merge(%{
         request_body_chunk: first_chunk,
         request_body_done?: false,
@@ -268,7 +297,7 @@ defmodule ReverseIt.HTTPProxy do
     end
   end
 
-  defp stream_request_with_mint(conn, url, headers, first_chunk, config) do
+  defp stream_request_with_mint(conn, url, headers, first_chunk, config, request_options) do
     uri = URI.parse(url)
     path = uri.path || "/"
     path = if uri.query, do: "#{path}?#{uri.query}", else: path
@@ -276,18 +305,17 @@ defmodule ReverseIt.HTTPProxy do
     case Upstream.connect(config, mode: :passive) do
       {:ok, mint_conn} ->
         try do
-          do_stream_request(conn, mint_conn, path, headers, first_chunk, config)
+          do_stream_request(conn, mint_conn, path, headers, first_chunk, config, request_options)
         after
           Mint.HTTP.close(mint_conn)
         end
 
       {:error, reason} ->
-        Logger.error("Failed to connect to backend for streaming: #{inspect(reason)}")
-        request_error(conn, config, reason)
+        request_error(conn, config, request_options, reason)
     end
   end
 
-  defp request_with_mint(conn, url, headers, body, config) do
+  defp request_with_mint(conn, url, headers, body, config, request_options) do
     uri = URI.parse(url)
     path = uri.path || "/"
     path = if uri.query, do: "#{path}?#{uri.query}", else: path
@@ -297,23 +325,21 @@ defmodule ReverseIt.HTTPProxy do
         try do
           case Mint.HTTP.request(mint_conn, conn.method, path, headers, body) do
             {:ok, mint_conn, ref} ->
-              stream_response_with_mint(conn, mint_conn, ref, config)
+              stream_response_with_mint(conn, mint_conn, ref, config, request_options)
 
             {:error, _mint_conn, reason} ->
-              Logger.error("Failed to send one-shot request: #{inspect(reason)}")
-              request_error(conn, config, reason)
+              request_error(conn, config, request_options, reason)
           end
         after
           Mint.HTTP.close(mint_conn)
         end
 
       {:error, reason} ->
-        Logger.error("Failed to connect one-shot upstream: #{inspect(reason)}")
-        request_error(conn, config, reason)
+        request_error(conn, config, request_options, reason)
     end
   end
 
-  defp do_stream_request(conn, mint_conn, path, headers, first_chunk, config) do
+  defp do_stream_request(conn, mint_conn, path, headers, first_chunk, config, request_options) do
     case Mint.HTTP.request(mint_conn, conn.method, path, headers, :stream) do
       {:ok, mint_conn, ref} ->
         with :ok <- ensure_request_body_limit(byte_size(first_chunk), config),
@@ -321,19 +347,17 @@ defmodule ReverseIt.HTTPProxy do
              {:ok, plug_conn, mint_conn} <-
                stream_request_body(conn, mint_conn, ref, config, byte_size(first_chunk)),
              {:ok, mint_conn} <- stream_mint_request_body(mint_conn, ref, :eof) do
-          stream_response_with_mint(plug_conn, mint_conn, ref, config)
+          stream_response_with_mint(plug_conn, mint_conn, ref, config, request_options)
         else
           {:error, :request_body_too_large} ->
-            request_error(conn, config, :request_body_too_large)
+            request_error(conn, config, request_options, :request_body_too_large)
 
           {:error, reason} ->
-            Logger.error("Failed to stream request body: #{inspect(reason)}")
-            request_error(conn, config, reason)
+            request_error(conn, config, request_options, reason)
         end
 
       {:error, _mint_conn, reason} ->
-        Logger.error("Failed to start streaming request: #{inspect(reason)}")
-        request_error(conn, config, reason)
+        request_error(conn, config, request_options, reason)
     end
   end
 
@@ -383,15 +407,17 @@ defmodule ReverseIt.HTTPProxy do
     end
   end
 
-  defp stream_response_with_mint(conn, mint_conn, ref, config) do
-    receive_response(response_acc(conn, config), mint_conn, ref)
+  defp stream_response_with_mint(conn, mint_conn, ref, config, request_options) do
+    receive_response(response_acc(conn, config, request_options), mint_conn, ref)
   end
 
   defp receive_response(acc, mint_conn, ref) do
     timeout =
-      if not acc.headers_received?,
-        do: acc.config.response_header_timeout,
-        else: acc.config.upstream_idle_timeout
+      if acc.headers_received? do
+        acc.config.upstream_idle_timeout
+      else
+        acc.config.response_header_timeout
+      end
 
     case Mint.HTTP.recv(mint_conn, 0, timeout) do
       {:ok, mint_conn, responses} ->
@@ -426,7 +452,7 @@ defmodule ReverseIt.HTTPProxy do
   defp process_responses(acc, [_ | rest], ref), do: process_responses(acc, rest, ref)
 
   # Keep the existing Plug response for direct upstream failures while waiting
-  # for headers. request/2 also exposes the phase to application error handlers.
+  # for headers. request/3 also exposes the phase to application error handlers.
   defp mint_receive_error(%{headers_received?: false}, reason),
     do: {:response_headers, reason}
 

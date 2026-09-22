@@ -157,7 +157,7 @@ end
 
 ## Application-controlled HTTP responses
 
-Use `ReverseIt.request/2` when your application needs to inspect or transform
+Use `ReverseIt.request/3` when your application needs to inspect or transform
 response bytes, buffer an error before deciding whether to retry, or forward a
 request body it has already read and validated. Ordinary `ReverseIt.call/2`
 continues to act as a Plug and sends the response automatically.
@@ -184,13 +184,16 @@ end
 config = ReverseIt.init(
   name: MyApp.ReverseProxy,
   backend: "https://api.example.com",
-  request_body: validated_body,
-  response_handler: {MyApp.ResponseHandler, %{bytes: 0}},
   forwarded_headers: false,
   protocols: [:http1]
 )
 
-case ReverseIt.request(conn, config) do
+request_opts = [
+  request_body: validated_body,
+  response_handler: {MyApp.ResponseHandler, %{bytes: 0}}
+]
+
+case ReverseIt.request(conn, config, request_opts) do
   {:ok, conn, _state} ->
     # The response has already been sent/streamed.
     Plug.Conn.halt(conn)
@@ -199,7 +202,7 @@ case ReverseIt.request(conn, config) do
     # Still unsent: inspect response.status/body, rewrite it, or decide whether
     # this operation is safe to retry using the same explicitly supplied body.
     conn
-    |> Plug.Conn.put_resp_content_type("application/json")
+    |> Plug.Conn.merge_resp_headers(response.headers)
     |> Plug.Conn.send_resp(response.status, response.body)
     |> Plug.Conn.halt()
 
@@ -211,8 +214,19 @@ end
 
 `request_body` accepts a binary, including `""`; `nil` keeps normal conn body
 reading/streaming. Explicit bodies still obey `max_request_body_size`, and their
-Content-Length is recalculated. Build this config per request rather than storing
-request bodies or per-request handler state in module attributes.
+Content-Length is recalculated. Initialize the static config once and reuse it.
+Pass the body and fresh handler state in the third argument for each request;
+`init/1` rejects these options. Handler modules are checked at request time, so
+initializing a router does not depend on their compilation order.
+
+### Per-request options (`request/3`)
+
+- `:request_body` — Already-read binary bytes, including `""`. Defaults to `nil`, which reads from the conn.
+- `:response_handler` — `{module, initial_state}` implementing `ReverseIt.ResponseHandler`. Defaults to `nil`, which forwards the response unchanged.
+
+Omitting the third argument is equivalent to passing `[]`. Unlike the Plug entry
+point, `request/3` leaves halting the conn and sending buffered/error results to
+the caller.
 
 The required `handle_headers/3` callback chooses streaming, finite buffering, or
 `{:error, reason, state}` before commitment. Optional `handle_data/2` and
@@ -226,18 +240,25 @@ final state. Downstream write failures use `{:downstream, reason}`. Callback
 exceptions propagate; `terminate/2` is not guaranteed for programming errors or
 process termination. It should be a lightweight observer and must not raise.
 
-The same callbacks run for pooled and one-shot HTTP. Handled streams drop the
-upstream Content-Length, and both received and emitted bytes obey
+The same callbacks run for pooled and one-shot HTTP. Proxy failures are logged
+once, before returning an error or aborting a committed stream. Handled streams
+drop the upstream Content-Length when a body is allowed. Both received and emitted bytes obey
 `max_response_body_size`. Buffering additionally requires its own finite limit.
 Header filtering/validation remains enforced before and after header callbacks.
 The proxy does not decompress responses; handlers can reject unsupported encodings
 before sending anything. HTTP/1 is recommended for synchronous backpressure.
 
+Handled streams commit the response when a callback first emits nonempty bytes.
+If all output is empty, commitment waits for a successful end callback. This rule
+is the same for finite and infinite response limits, so a first-chunk rejection
+can always return an unsent error. Headers are handled only once; informational
+responses and trailers do not rerun the header callback.
+
 After commitment, transport or callback-reported failures abort the downstream
 stream rather than completing a truncated body. Never catch and convert such an
 exit into a successful response. Configuring a handler disables automatic
 `response_header_retries`; retry decisions remain with the caller. WebSocket
-upgrades are rejected by `request/2`; the existing Plug WebSocket API is unchanged.
+upgrades are rejected by `request/3`; the existing Plug WebSocket API is unchanged.
 
 ### Pinning an upstream address
 
@@ -279,6 +300,7 @@ identities. The shared direct transport also supports pinning WebSocket upstream
 
 - `:name` (required) - Name of the Finch pool to use
 - `:backend` (required) - Backend URL (http://, https://, ws://, or wss://)
+- `:connect_ip` - Vetted IPv4/IPv6 address tuple to dial while retaining the backend hostname for TLS verification, SNI, and HTTP authority. Requires `:one_shot`; cannot be combined with `:unix_socket`.
 - `:unix_socket` - Connect through this Unix-domain socket instead of the backend host/port
 - `:upstream_connection` - `:pooled` or `:one_shot` (default: `:pooled`)
 - `:strip_path` - Path prefix to strip from incoming requests

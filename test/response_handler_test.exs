@@ -1,5 +1,7 @@
 defmodule ReverseIt.ResponseHandlerTest do
   use ExUnit.Case, async: true
+  import ExUnit.CaptureLog
+  @moduletag :capture_log
 
   alias ReverseIt.TestResponseHandler, as: Handler
 
@@ -11,7 +13,7 @@ defmodule ReverseIt.ResponseHandlerTest do
       config = config(@mode, port, {:buffer, 100})
 
       assert {:buffered, %{status: 429, body: "retry", headers: headers}, conn, state} =
-               ReverseIt.request(Plug.Test.conn(:get, "/"), config)
+               request(Plug.Test.conn(:get, "/"), config)
 
       assert {"content-length", "5"} in headers
       refute conn.state in [:sent, :chunked]
@@ -22,9 +24,15 @@ defmodule ReverseIt.ResponseHandlerTest do
       assert Plug.Conn.send_resp(conn, 200, "replacement").resp_body == "replacement"
     end
 
-    test "#{mode}: the Plug entry point sends buffered responses" do
+    test "#{mode}: a wrapper Plug sends buffered responses" do
       {port, _} = backend("HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello")
-      conn = ReverseIt.call(Plug.Test.conn(:get, "/"), config(@mode, port, {:buffer, 100}))
+
+      conn =
+        ReverseIt.TestHandledProxy.call(
+          Plug.Test.conn(:get, "/"),
+          config(@mode, port, {:buffer, 100})
+        )
+
       assert conn.status == 200
       assert conn.resp_body == "hello"
       assert conn.halted
@@ -40,7 +48,7 @@ defmodule ReverseIt.ResponseHandlerTest do
       config =
         config(@mode, port, {:buffer, 1024}, request_body: payload, max_request_body_size: 100)
 
-      assert {:buffered, response, _conn, _} = ReverseIt.request(conn, config)
+      assert {:buffered, response, _conn, _} = request(conn, config)
       assert Jason.decode!(response.body)["echo"] == payload
     end
 
@@ -48,7 +56,7 @@ defmodule ReverseIt.ResponseHandlerTest do
       config = config(@mode, 1, {:buffer, 10}, request_body: "12345", max_request_body_size: 4)
 
       assert {:error, :request_body_too_large, conn, state} =
-               ReverseIt.request(Plug.Test.conn(:post, "/"), config)
+               request(Plug.Test.conn(:post, "/"), config)
 
       assert conn.state == :unset
       assert_receive {:terminated, {:error, :request_body_too_large}, ^state}
@@ -58,7 +66,7 @@ defmodule ReverseIt.ResponseHandlerTest do
       port = Application.fetch_env!(:reverse_it, :test_backend_port)
 
       assert {:buffered, response, _, _} =
-               ReverseIt.request(
+               request(
                  Plug.Test.conn(:post, "/echo", "ignore me"),
                  config(@mode, port, {:buffer, 100}, request_body: "")
                )
@@ -70,7 +78,7 @@ defmodule ReverseIt.ResponseHandlerTest do
       {port, _} = backend("HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello")
 
       assert {:ok, conn, state} =
-               ReverseIt.request(Plug.Test.conn(:get, "/"), config(@mode, port, :suffix))
+               request(Plug.Test.conn(:get, "/"), config(@mode, port, :suffix))
 
       assert conn.resp_body == "hello!"
       assert Plug.Conn.get_resp_header(conn, "content-length") == []
@@ -84,7 +92,7 @@ defmodule ReverseIt.ResponseHandlerTest do
         backend("HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: 99\r\n\r\n")
 
       assert {:error, :unsupported_encoding, conn, state} =
-               ReverseIt.request(Plug.Test.conn(:get, "/"), config(@mode, port, :reject))
+               request(Plug.Test.conn(:get, "/"), config(@mode, port, :reject))
 
       assert conn.state == :unset
       assert_receive {:terminated, {:error, :unsupported_encoding}, ^state}
@@ -99,7 +107,7 @@ defmodule ReverseIt.ResponseHandlerTest do
         {port, _} = backend(response)
 
         assert {:error, :response_buffer_too_large, conn, _} =
-                 ReverseIt.request(Plug.Test.conn(:get, "/"), config(@mode, port, {:buffer, 4}))
+                 request(Plug.Test.conn(:get, "/"), config(@mode, port, {:buffer, 4}))
 
         assert conn.state == :unset
       end
@@ -109,7 +117,7 @@ defmodule ReverseIt.ResponseHandlerTest do
       {port, _} = backend("HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello")
 
       assert {:error, :response_body_too_large, _, _} =
-               ReverseIt.request(
+               request(
                  Plug.Test.conn(:get, "/"),
                  config(@mode, port, {:buffer, 100}, max_response_body_size: 4)
                )
@@ -117,7 +125,7 @@ defmodule ReverseIt.ResponseHandlerTest do
       {port, _} = backend("HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello")
 
       assert {:error, :response_body_too_large, conn, _} =
-               ReverseIt.request(
+               request(
                  Plug.Test.conn(:get, "/"),
                  config(@mode, port, :expand, max_response_body_size: 8)
                )
@@ -133,19 +141,28 @@ defmodule ReverseIt.ResponseHandlerTest do
         )
 
       config = config(@mode, port, :frames)
-      task = Task.async(fn -> ReverseIt.request(Plug.Test.conn(:get, "/"), config) end)
+      task = Task.async(fn -> request(Plug.Test.conn(:get, "/"), config) end)
       assert_receive {:data, "sec"}, 2000
       send(upstream, :finish)
       assert {:ok, conn, %{pending: ""}} = Task.await(task)
       assert conn.resp_body == "REDACTED\n"
     end
 
-    test "#{mode}: reports incomplete transformed frames and aborts committed responses" do
+    test "#{mode}: incomplete frames fail before commitment if no bytes were emitted" do
       {port, _} = backend("HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nsec")
 
-      assert catch_exit(
-               ReverseIt.request(Plug.Test.conn(:get, "/"), config(@mode, port, :frames))
-             ) ==
+      assert {:error, :incomplete_frame, conn, _} =
+               request(Plug.Test.conn(:get, "/"), config(@mode, port, :frames))
+
+      assert conn.state == :unset
+      assert_receive {:terminated, {:error, :incomplete_frame}, %{pending: "sec"}}
+      refute_receive {:terminated, _, _}
+    end
+
+    test "#{mode}: incomplete frames abort after emitting a complete frame" do
+      {port, _} = backend("HTTP/1.1 200 OK\r\nContent-Length: 6\r\n\r\nok\nsec")
+
+      assert catch_exit(request(Plug.Test.conn(:get, "/"), config(@mode, port, :frames))) ==
                {:upstream_stream_failed, :incomplete_frame}
 
       assert_receive {:terminated, {:error, :incomplete_frame}, %{pending: "sec"}}
@@ -156,7 +173,7 @@ defmodule ReverseIt.ResponseHandlerTest do
       {port, _} = backend("HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nshort")
 
       assert {:error, _, conn, _} =
-               ReverseIt.request(Plug.Test.conn(:get, "/"), config(@mode, port, {:buffer, 100}))
+               request(Plug.Test.conn(:get, "/"), config(@mode, port, {:buffer, 100}))
 
       assert conn.state == :unset
       assert_receive {:terminated, {:error, _}, _}
@@ -164,9 +181,7 @@ defmodule ReverseIt.ResponseHandlerTest do
       {port, _} = backend("HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nshort")
 
       assert {:upstream_stream_failed, _} =
-               catch_exit(
-                 ReverseIt.request(Plug.Test.conn(:get, "/"), config(@mode, port, :passthrough))
-               )
+               catch_exit(request(Plug.Test.conn(:get, "/"), config(@mode, port, :passthrough)))
 
       assert_receive {:terminated, {:error, _}, _}
     end
@@ -196,7 +211,7 @@ defmodule ReverseIt.ResponseHandlerTest do
       {port, _} = backend("HTTP/1.1 200 OK\r\nContent-Length: 9999\r\n\r\n")
 
       assert {:buffered, %{body: "", headers: headers}, _, _} =
-               ReverseIt.request(
+               request(
                  Plug.Test.conn(:head, "/"),
                  config(@mode, port, {:buffer, 0}, max_response_body_size: 0)
                )
@@ -209,9 +224,12 @@ defmodule ReverseIt.ResponseHandlerTest do
       conn = Plug.Test.conn(:post, "/echo", "validated body")
       {:ok, body, conn} = Plug.Conn.read_body(conn)
       config = config(@mode, port, {:buffer, 1024}, request_body: body)
-      assert {:buffered, %{status: 429}, conn, _} = ReverseIt.request(conn, config)
+      assert {:buffered, %{status: 429}, conn, _} = request(conn, config)
       port = Application.fetch_env!(:reverse_it, :test_backend_port)
-      assert {:buffered, response, _, _} = ReverseIt.request(conn, %{config | port: port})
+
+      assert {:buffered, response, _, _} =
+               request(conn, {%{elem(config, 0) | port: port}, elem(config, 1)})
+
       assert Jason.decode!(response.body)["echo"] == body
     end
 
@@ -226,7 +244,7 @@ defmodule ReverseIt.ResponseHandlerTest do
         )
 
       assert {:buffered, response, _, _} =
-               ReverseIt.request(Plug.Test.conn(:post, "/echo", body), config)
+               request(Plug.Test.conn(:post, "/echo", body), config)
 
       assert Jason.decode!(response.body)["echo"] == body
     end
@@ -252,7 +270,7 @@ defmodule ReverseIt.ResponseHandlerTest do
       {_, adapter_state} = conn.adapter
       conn = %{conn | adapter: {ReverseIt.DisconnectedAdapter, adapter_state}}
 
-      assert catch_exit(ReverseIt.request(conn, config(@mode, port, :passthrough))) ==
+      assert catch_exit(request(conn, config(@mode, port, :passthrough))) ==
                {:upstream_stream_failed, {:downstream, :closed}}
 
       assert_receive {:terminated, {:error, {:downstream, :closed}}, %{bytes: 5}}
@@ -278,20 +296,168 @@ defmodule ReverseIt.ResponseHandlerTest do
       )
 
       assert_raise RuntimeError, "handler bug", fn ->
-        ReverseIt.request(Plug.Test.conn(:get, "/"), config(@mode, port, :raise))
+        request(Plug.Test.conn(:get, "/"), config(@mode, port, :raise))
       end
 
       assert_receive {:upstream_closed, {:error, :closed}}, 2000
     end
-  end
 
-  test "rejects invalid handlers and request body types" do
-    assert_raise ArgumentError, ~r/response_handler/, fn ->
-      ReverseIt.init(name: Unused, backend: "http://localhost", response_handler: {String, nil})
+    test "#{mode}: trailers never repeat the header callback or change response mode" do
+      for handler_mode <- [:passthrough, {:buffer, 100}] do
+        {port, _} =
+          backend(
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nTrailer: X-Final\r\n\r\n" <>
+              "5\r\nhello\r\n0\r\nX-Final: yes\r\n\r\n"
+          )
+
+        result = request(Plug.Test.conn(:get, "/"), config(@mode, port, handler_mode))
+
+        case result do
+          {:ok, conn, _} ->
+            assert conn.resp_body == "hello"
+
+          {:buffered, response, conn, _} ->
+            assert response.body == "hello"
+            assert conn.state == :unset
+        end
+
+        assert_receive {:headers, 200, headers}
+        refute List.keymember?(headers, "x-final", 0)
+        refute_receive {:headers, _, _}
+      end
     end
 
-    assert_raise ArgumentError, ~r/request_body/, fn ->
-      ReverseIt.init(name: Unused, backend: "http://localhost", request_body: ["iodata"])
+    test "#{mode}: first-chunk rejection stays unsent with finite or infinite limits" do
+      for limit <- [:infinity, 100] do
+        {port, _} = backend("HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello")
+
+        assert {:error, :bad_data, conn, %{bytes: 5}} =
+                 request(
+                   Plug.Test.conn(:get, "/"),
+                   config(@mode, port, :reject_data, max_response_body_size: limit)
+                 )
+
+        assert conn.state == :unset
+        assert_receive {:terminated, {:error, :bad_data}, _}
+      end
+    end
+
+    test "#{mode}: invalid callback headers fail before any response is committed" do
+      {port, _} = backend("HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello")
+
+      assert {:error, :invalid_response_header, conn, _} =
+               request(Plug.Test.conn(:get, "/"), config(@mode, port, :bad_headers))
+
+      assert conn.state == :unset
+      assert_receive {:terminated, {:error, :invalid_response_header}, _}
+      refute_receive {:data, _}
+    end
+
+    test "#{mode}: buffered bodyless statuses discard representation length" do
+      for status <- [204, 304] do
+        {port, _} = backend("HTTP/1.1 #{status} Empty\r\nContent-Length: 100\r\n\r\n")
+
+        conn =
+          ReverseIt.TestHandledProxy.call(
+            Plug.Test.conn(:get, "/"),
+            config(@mode, port, {:buffer, 0}, max_response_body_size: 0)
+          )
+
+        assert conn.status == status
+        assert conn.resp_body == ""
+        assert Plug.Conn.get_resp_header(conn, "content-length") == []
+      end
+    end
+
+    test "#{mode}: finite limits permit streaming and abort overflow after emitted bytes" do
+      {port, upstream} =
+        backend(
+          "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\none\n\r\n",
+          "4\r\ntwo\n\r\n0\r\n\r\n"
+        )
+
+      proxy = proxy(config(@mode, port, :frames, max_response_body_size: 8))
+      {:ok, socket} = :gen_tcp.connect({127, 0, 0, 1}, proxy, [:binary, active: false])
+      on_exit(fn -> :gen_tcp.close(socket) end)
+
+      :ok =
+        :gen_tcp.send(socket, "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+
+      assert recv_until(socket, "one\n") =~ "200 OK"
+      send(upstream, :finish)
+      assert recv_until(socket, "two\n") =~ "two\n"
+      assert_receive {:terminated, :ok, _}, 2000
+
+      {port, upstream} =
+        backend(
+          "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n",
+          "5\r\nworld\r\n0\r\n\r\n"
+        )
+
+      opts = config(@mode, port, :passthrough, max_response_body_size: 8)
+
+      task =
+        Task.async(fn ->
+          catch_exit(request(Plug.Test.conn(:get, "/"), opts))
+        end)
+
+      assert_receive {:data, "hello"}, 2000
+      send(upstream, :finish)
+      assert Task.await(task) == {:upstream_stream_failed, :response_body_too_large}
+      assert_receive {:terminated, {:error, :response_body_too_large}, _}
+    end
+
+    test "#{mode}: the Plug logs a refused connection exactly once" do
+      {:ok, listener} = :gen_tcp.listen(0, [:binary, active: false, ip: {127, 0, 0, 1}])
+      {:ok, port} = :inet.port(listener)
+      :gen_tcp.close(listener)
+      {config, _opts} = config(@mode, port, :passthrough)
+
+      log =
+        capture_log(fn ->
+          assert ReverseIt.call(Plug.Test.conn(:get, "/"), config).status == 502
+        end)
+
+      assert length(Regex.scan(~r/Failed to proxy HTTP response/, log)) == 1
+      assert log =~ "before commitment"
+      assert log =~ "econnrefused"
+    end
+
+    test "#{mode}: committed upstream failures are logged once" do
+      {port, _} = backend("HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nshort")
+      {config, _opts} = config(@mode, port, :passthrough)
+
+      log =
+        capture_log(fn ->
+          assert {:upstream_stream_failed, _} =
+                   catch_exit(ReverseIt.call(Plug.Test.conn(:get, "/"), config))
+        end)
+
+      assert length(Regex.scan(~r/Failed to proxy HTTP response/, log)) == 1
+      assert log =~ "after commitment"
+    end
+  end
+
+  test "rejects per-request options in static configuration" do
+    for opts <- [[request_body: "body"], [response_handler: {NotCompiledYet, nil}]] do
+      assert_raise ArgumentError, ~r/per-request options/, fn ->
+        ReverseIt.init([name: Unused, backend: "http://localhost"] ++ opts)
+      end
+    end
+  end
+
+  test "validates per-request types and handler modules at request time" do
+    config = ReverseIt.init(name: Unused, backend: "http://localhost:1")
+
+    for opts <- [
+          [response_handler: {String, nil}],
+          [response_handler: {NotCompiledYet, nil}],
+          [request_body: ["iodata"]],
+          [unknown: true]
+        ] do
+      assert_raise ArgumentError, ~r/Invalid ReverseIt request options/, fn ->
+        ReverseIt.request(Plug.Test.conn(:get, "/"), config, opts)
+      end
     end
   end
 
@@ -325,26 +491,130 @@ defmodule ReverseIt.ResponseHandlerTest do
     config = config(:one_shot, port, {:buffer, 100}, response_header_timeout: 20)
 
     assert {:error, {:response_headers, %Mint.TransportError{reason: :timeout}}, conn, _} =
-             ReverseIt.request(Plug.Test.conn(:get, "/"), config)
+             request(Plug.Test.conn(:get, "/"), config)
 
     assert conn.state == :unset
-    conn = ReverseIt.call(conn, %{config | response_handler: nil})
-    assert conn.status == 504
+
+    log =
+      capture_log(fn ->
+        assert ReverseIt.call(conn, elem(config, 0)).status == 504
+      end)
+
+    assert length(Regex.scan(~r/Failed to proxy HTTP response/, log)) == 1
+    assert log =~ "response_headers"
+    assert log =~ "timeout"
+  end
+
+  test "request/3 returns client validation errors without touching upstream" do
+    conn =
+      Plug.Test.conn(:get, "/long-path")
+      |> Plug.Conn.put_req_header("x-one", "long-value")
+      |> Plug.Conn.put_req_header("x-two", "long-value")
+
+    for {opts, reason} <- [
+          {[max_request_target_bytes: 1], :request_target_too_large},
+          {[max_request_headers: 1], :too_many_request_headers},
+          {[max_request_header_bytes: 1], :request_headers_too_large},
+          {[max_request_header_line_bytes: 1], :request_header_line_too_large}
+        ] do
+      config = ReverseIt.init([name: Unused, backend: "http://localhost:1"] ++ opts)
+      assert {:error, ^reason, ^conn, nil} = ReverseIt.request(conn, config)
+    end
+  end
+
+  test "a static config is reusable with different request bodies and handler state" do
+    port = Application.fetch_env!(:reverse_it, :test_backend_port)
+    config = ReverseIt.init(name: ReverseIt.TestFinch, backend: "http://127.0.0.1:#{port}")
+    refute Map.has_key?(config, :request_body)
+    refute Map.has_key?(config, :response_handler)
+
+    for body <- ["first", "second"] do
+      state = %{owner: self(), mode: {:buffer, 1024}, request_id: body}
+
+      assert {:buffered, response, _, ^state} =
+               ReverseIt.request(Plug.Test.conn(:post, "/echo"), config,
+                 request_body: body,
+                 response_handler: {Handler, state}
+               )
+
+      assert Jason.decode!(response.body)["echo"] == body
+    end
+  end
+
+  test "pooled HTTP/2 invokes streaming and buffering callbacks" do
+    start_supervised!({ReverseIt, name: ReverseIt.HandlerHTTP2Finch, protocols: [:http2]})
+
+    backend =
+      start_supervised!(
+        {Bandit, plug: {ReverseIt.TestProtocolBackend, self()}, port: 0, ip: {127, 0, 0, 1}}
+      )
+
+    config =
+      ReverseIt.init(
+        name: ReverseIt.HandlerHTTP2Finch,
+        backend: "http://127.0.0.1:#{TestHelper.listener_port(backend)}",
+        protocols: [:http2]
+      )
+
+    # Finch registers an HTTP/2 pool after its asynchronous connection setup.
+    wait_for_http2("http://127.0.0.1:#{config.port}", 200)
+    assert_receive {:upstream_protocol, :"HTTP/2"}
+
+    assert {:ok, conn, %{bytes: 5}} =
+             ReverseIt.request(Plug.Test.conn(:get, "/"), config,
+               response_handler: {Handler, %{owner: self(), mode: :suffix}}
+             )
+
+    assert conn.resp_body == "hello!"
+    assert_receive {:upstream_protocol, :"HTTP/2"}
+    assert_receive {:headers, 200, _}
+    refute_receive {:headers, _, _}
+
+    assert {:buffered, %{status: 429, body: "retry"}, conn, _} =
+             ReverseIt.request(Plug.Test.conn(:get, "/error"), config,
+               response_handler: {Handler, %{owner: self(), mode: {:buffer, 100}}}
+             )
+
+    assert conn.state == :unset
+    assert_receive {:upstream_protocol, :"HTTP/2"}
+  end
+
+  defp wait_for_http2(_url, 0), do: flunk("HTTP/2 pool did not become ready")
+
+  defp wait_for_http2(url, attempts) do
+    case Finch.request(Finch.build(:get, url), ReverseIt.HandlerHTTP2Finch) do
+      {:ok, %{status: 200}} ->
+        :ok
+
+      {:error, %Finch.Error{reason: :pool_not_available}} ->
+        Process.sleep(10)
+        wait_for_http2(url, attempts - 1)
+
+      result ->
+        flunk("HTTP/2 connection failed: #{inspect(result)}")
+    end
   end
 
   defp config(connection_mode, port, handler_mode, opts \\ []) do
-    ReverseIt.init(
-      Keyword.merge(
-        [
-          name: ReverseIt.TestFinch,
-          backend: "http://127.0.0.1:#{port}",
-          upstream_connection: connection_mode,
-          response_handler: {Handler, %{owner: self(), mode: handler_mode}}
-        ],
-        opts
+    {request_opts, static_opts} = Keyword.split(opts, [:request_body, :response_handler])
+
+    config =
+      ReverseIt.init(
+        Keyword.merge(
+          [
+            name: ReverseIt.TestFinch,
+            backend: "http://127.0.0.1:#{port}",
+            upstream_connection: connection_mode
+          ],
+          static_opts
+        )
       )
-    )
+
+    {config,
+     Keyword.put(request_opts, :response_handler, {Handler, %{owner: self(), mode: handler_mode}})}
   end
+
+  defp request(conn, {config, opts}), do: ReverseIt.request(conn, config, opts)
 
   defp backend(response, remaining \\ nil) do
     {:ok, listener} = :gen_tcp.listen(0, [:binary, active: false, ip: {127, 0, 0, 1}])
@@ -354,6 +624,7 @@ defmodule ReverseIt.ResponseHandlerTest do
     task =
       start_supervised!(%{
         id: make_ref(),
+        restart: :temporary,
         start:
           {Task, :start_link,
            [

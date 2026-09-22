@@ -1,9 +1,11 @@
 defmodule ReverseIt.ResponseStream do
   @moduledoc false
+
+  require Logger
   alias ReverseIt.Headers
 
-  def new(conn, config) do
-    {handler, state} = config.response_handler || {nil, nil}
+  def new(conn, config, response_handler \\ nil) do
+    {handler, state} = response_handler || {nil, nil}
 
     %{
       conn: conn,
@@ -18,13 +20,17 @@ defmodule ReverseIt.ResponseStream do
       error: nil,
       handler: handler,
       handler_state: state,
-      mode: :stream,
+      response_mode: :stream,
       buffer_limit: nil,
       chunks: []
     }
   end
 
   def event({:status, status}, acc), do: {:cont, %{acc | status: status}}
+
+  # Mint emits chunked trailers as a second headers event. Like Finch's explicit
+  # trailers event, these must not re-run the pre-commit callback or change mode.
+  def event({:headers, _trailers}, %{headers_received?: true} = acc), do: {:cont, acc}
 
   def event({:headers, headers}, acc) do
     headers = acc.headers ++ headers
@@ -57,10 +63,12 @@ defmodule ReverseIt.ResponseStream do
       exceeds?(acc.response_bytes, acc.config.max_response_body_size) ->
         halt(acc, :response_body_too_large)
 
-      acc.mode == :buffer ->
-        if acc.response_bytes > acc.buffer_limit,
-          do: halt(acc, :response_buffer_too_large),
-          else: {:cont, %{acc | chunks: [data | acc.chunks]}}
+      acc.response_mode == :buffer ->
+        if acc.response_bytes > acc.buffer_limit do
+          halt(acc, :response_buffer_too_large)
+        else
+          {:cont, %{acc | chunks: [data | acc.chunks]}}
+        end
 
       true ->
         transform(acc, :handle_data, [data])
@@ -69,44 +77,83 @@ defmodule ReverseIt.ResponseStream do
 
   def event({:trailers, _}, acc), do: {:cont, acc}
 
-  defp prepare(%{handler: nil} = acc), do: maybe_start(acc)
+  def finish(%{error: reason} = acc) when not is_nil(reason), do: fail(acc, reason)
+  def finish(%{status: nil} = acc), do: fail(acc, :missing_response_status)
+
+  def finish(%{response_mode: :buffer} = acc) do
+    body = acc.chunks |> Enum.reverse() |> IO.iodata_to_binary()
+    {:ok, headers} = Headers.response_headers(acc.headers, acc.config, mode: header_mode(acc))
+    notify(acc, :buffered)
+
+    {:buffered, %{status: acc.status, headers: headers, body: body}, acc.conn, acc.handler_state}
+  end
+
+  def finish(acc) do
+    result = if send_body?(acc), do: transform(acc, :handle_end, []), else: {:cont, acc}
+
+    case result do
+      {:halt, acc} ->
+        fail(acc, acc.error)
+
+      {:cont, acc} ->
+        acc = finish_response(acc)
+        notify(acc, :ok)
+        {:ok, acc.conn, acc.handler_state}
+    end
+  end
+
+  def fail(acc, reason) do
+    phase = if acc.sent?, do: "after commitment", else: "before commitment"
+    Logger.error("Failed to proxy HTTP response (#{phase}): #{inspect(reason)}")
+    notify(acc, {:error, reason})
+
+    if acc.sent? do
+      exit({:upstream_stream_failed, reason})
+    end
+
+    {:error, reason, acc.conn, acc.handler_state}
+  end
+
+  defp prepare(%{handler: nil} = acc) do
+    if send_body?(acc) and acc.config.max_response_body_size == :infinity do
+      start(acc)
+    else
+      {:cont, acc}
+    end
+  end
 
   defp prepare(acc) do
     case acc.handler.handle_headers(acc.status, acc.headers, acc.handler_state) do
       {:stream, headers, state} ->
         # A transforming stream must never retain an upstream byte count.
-        mode = if send_body?(acc), do: :bodyless, else: :identity
+        header_mode = if send_body?(acc), do: :bodyless, else: header_mode(acc)
 
-        case Headers.response_headers(headers, acc.config, mode: mode) do
-          {:ok, headers} -> maybe_start(%{acc | headers: headers, handler_state: state})
+        case Headers.response_headers(headers, acc.config, mode: header_mode) do
+          {:ok, headers} -> {:cont, %{acc | headers: headers, handler_state: state}}
           {:error, reason} -> halt(%{acc | handler_state: state}, reason)
         end
 
       {:buffer, limit, state} when is_integer(limit) and limit >= 0 ->
-        acc = %{acc | mode: :buffer, buffer_limit: limit, handler_state: state}
+        acc = %{acc | response_mode: :buffer, buffer_limit: limit, handler_state: state}
 
-        if send_body?(acc) and content_length_exceeds?(acc.headers, limit),
-          do: halt(acc, :response_buffer_too_large),
-          else: {:cont, acc}
+        if send_body?(acc) and content_length_exceeds?(acc.headers, limit) do
+          halt(acc, :response_buffer_too_large)
+        else
+          {:cont, acc}
+        end
 
       {:error, reason, state} ->
         halt(%{acc | handler_state: state}, reason)
     end
   end
 
-  defp maybe_start(acc) do
-    cond do
-      not send_body?(acc) -> {:cont, acc}
-      acc.config.max_response_body_size == :infinity -> start(acc)
-      true -> {:cont, acc}
-    end
-  end
-
   defp transform(acc, callback, args) do
     result =
-      if acc.handler && function_exported?(acc.handler, callback, length(args) + 1),
-        do: apply(acc.handler, callback, args ++ [acc.handler_state]),
-        else: {:ok, List.first(args) || "", acc.handler_state}
+      if acc.handler && function_exported?(acc.handler, callback, length(args) + 1) do
+        apply(acc.handler, callback, args ++ [acc.handler_state])
+      else
+        {:ok, List.first(args) || "", acc.handler_state}
+      end
 
     case result do
       {:ok, data, state} -> emit(%{acc | handler_state: state}, data)
@@ -144,65 +191,43 @@ defmodule ReverseIt.ResponseStream do
     {:cont, %{acc | conn: conn, sent?: true}}
   end
 
-  def finish(%{error: reason} = acc) when not is_nil(reason), do: fail(acc, reason)
-  def finish(%{status: nil} = acc), do: fail(acc, :missing_response_status)
+  defp finish_response(acc) do
+    if send_body?(acc) do
+      {:cont, acc} = start(acc)
+      acc
+    else
+      {:ok, headers} = Headers.response_headers(acc.headers, acc.config, mode: header_mode(acc))
 
-  def finish(%{mode: :buffer} = acc) do
-    body = acc.chunks |> Enum.reverse() |> IO.iodata_to_binary()
-    notify(acc, :buffered)
+      conn =
+        acc.conn
+        |> Headers.put_response_headers(headers)
+        |> Plug.Conn.send_resp(acc.status, "")
 
-    {:buffered, %{status: acc.status, headers: acc.headers, body: body}, acc.conn,
-     acc.handler_state}
-  end
-
-  def finish(acc) do
-    result = if send_body?(acc), do: transform(acc, :handle_end, []), else: {:cont, acc}
-
-    case result do
-      {:halt, acc} ->
-        fail(acc, acc.error)
-
-      {:cont, acc} ->
-        acc =
-          if send_body?(acc) do
-            {:cont, acc} = start(acc)
-            acc
-          else
-            mode = if acc.method == "HEAD", do: :identity, else: :bodyless
-            {:ok, headers} = Headers.response_headers(acc.headers, acc.config, mode: mode)
-
-            conn =
-              acc.conn
-              |> Headers.put_response_headers(headers)
-              |> Plug.Conn.send_resp(acc.status, "")
-
-            %{acc | conn: conn, sent?: true}
-          end
-
-        notify(acc, :ok)
-        {:ok, acc.conn, acc.handler_state}
+      %{acc | conn: conn, sent?: true}
     end
-  end
-
-  def fail(acc, reason) do
-    notify(acc, {:error, reason})
-    if acc.sent?, do: exit({:upstream_stream_failed, reason})
-    {:error, reason, acc.conn, acc.handler_state}
   end
 
   defp notify(%{handler: nil}, _), do: :ok
 
   defp notify(acc, outcome) do
-    if function_exported?(acc.handler, :terminate, 2),
-      do: acc.handler.terminate(outcome, acc.handler_state)
+    if function_exported?(acc.handler, :terminate, 2) do
+      acc.handler.terminate(outcome, acc.handler_state)
+    end
   end
 
+  defp header_mode(%{method: "HEAD"}), do: :identity
+
+  defp header_mode(acc), do: if(send_body?(acc), do: :identity, else: :bodyless)
+
   defp halt(acc, reason), do: {:halt, %{acc | error: reason}}
+
   defp send_body?(%{method: "HEAD"}), do: false
   defp send_body?(%{status: status}) when status in 100..199 or status in [204, 304], do: false
   defp send_body?(_), do: true
+
   defp exceeds?(_, :infinity), do: false
   defp exceeds?(size, limit), do: size > limit
+
   defp content_length_exceeds?(_, :infinity), do: false
 
   defp content_length_exceeds?(headers, limit) do

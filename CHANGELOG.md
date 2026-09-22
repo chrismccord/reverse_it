@@ -26,13 +26,13 @@ resource limits; review the upgrade notes before deploying.
 
 ### HTTP extension API
 
-- Add `ReverseIt.request/2`, returning unsent buffered responses and pre-commit
+- Add `ReverseIt.request/3`, returning unsent buffered responses and pre-commit
   errors for application-owned processing and retry decisions.
-- Add `response_handler: {module, state}` with header selection, streaming data,
+- Add the per-request `response_handler: {module, state}` option with header selection, streaming data,
   end-of-stream, and lifecycle callbacks shared by pooled and one-shot HTTP.
   Buffers require finite limits; transformed streams discard upstream length
   headers and enforce the response byte limit on received and emitted data.
-- Add `request_body` for already-read binary bodies, retaining body limits and
+- Add the per-request `request_body` option for already-read binary bodies, retaining body limits and
   recalculating request framing.
 - Add `connect_ip` for vetted IPv4/IPv6 destinations while retaining the backend
   hostname for TLS verification, SNI, and HTTP authority. Initially restricted to
@@ -40,6 +40,13 @@ resource limits; review the upgrade notes before deploying.
 - Close direct upstream sockets even if a response handler raises or a committed
   downstream stream is aborted. Handled requests disable automatic header retries;
   applications own retries before downstream commitment.
+
+- Keep request data out of static Plug configuration. Handler validation happens
+  at request time, avoiding parallel compiler ordering dependencies.
+- Invoke handled response headers once, ignoring trailers, and commit handled
+  streams on first emitted bytes regardless of the response size limit. Strip
+  representation lengths from buffered bodyless responses as well as streamed ones.
+- Log HTTP proxy failures once, including header timeouts and post-commit failures.
 
 ### HTTP fixes
 

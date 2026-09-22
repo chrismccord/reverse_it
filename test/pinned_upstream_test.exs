@@ -24,7 +24,7 @@ defmodule ReverseIt.PinnedUpstreamTest do
     config = config("http://does-not-resolve.invalid:#{port}")
 
     assert {:buffered, response, _, _} =
-             ReverseIt.request(Plug.Test.conn(:get, "/headers"), config)
+             request(Plug.Test.conn(:get, "/headers"), config)
 
     assert Jason.decode!(response.body)["headers"]["host"] == "does-not-resolve.invalid:#{port}"
   end
@@ -35,7 +35,7 @@ defmodule ReverseIt.PinnedUpstreamTest do
     port = tls_backend(tls)
 
     assert {:buffered, %{body: "ok"}, _, _} =
-             ReverseIt.request(
+             request(
                Plug.Test.conn(:get, "/"),
                config("https://connector.test:#{port}")
              )
@@ -50,7 +50,7 @@ defmodule ReverseIt.PinnedUpstreamTest do
     port = tls_backend(trusted_tls(dir))
 
     assert {:error, %Mint.TransportError{reason: {:tls_alert, _}}, conn, _} =
-             ReverseIt.request(Plug.Test.conn(:get, "/"), config("https://wrong.test:#{port}"))
+             request(Plug.Test.conn(:get, "/"), config("https://wrong.test:#{port}"))
 
     assert conn.state == :unset
     refute_receive {:upstream_request, _}
@@ -69,12 +69,34 @@ defmodule ReverseIt.PinnedUpstreamTest do
     assert config.host == "connector.test"
   end
 
+  test "pinned WebSocket uses the backend authority without resolving its hostname" do
+    port = Application.fetch_env!(:reverse_it, :test_backend_port)
+    config = config("ws://does-not-resolve.invalid:#{port}")
+    client = %{headers: [], remote_ip: "127.0.0.1", scheme: "http", host: "localhost"}
+    assert {:ok, state, _headers} = ReverseIt.WebSocketHandshake.open(config, client, "/ws", "")
+
+    try do
+      assert {:ok, state} = ReverseIt.WebSocketProxy.handle_in({"pinned", opcode: :text}, state)
+      assert_receive {:tcp, _, _} = message, 2000
+
+      assert {:push, [{:text, "Backend echo: pinned"}], _state} =
+               ReverseIt.WebSocketProxy.handle_info(message, state)
+    after
+      Mint.HTTP.close(state.conn)
+    end
+  end
+
   defp config(url) do
     ReverseIt.init(
       name: ReverseIt.TestFinch,
       backend: url,
       connect_ip: {127, 0, 0, 1},
-      upstream_connection: :one_shot,
+      upstream_connection: :one_shot
+    )
+  end
+
+  defp request(conn, config) do
+    ReverseIt.request(conn, config,
       response_handler: {ReverseIt.TestResponseHandler, %{owner: self(), mode: {:buffer, 4096}}}
     )
   end

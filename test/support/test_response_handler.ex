@@ -7,6 +7,7 @@ defmodule ReverseIt.TestResponseHandler do
 
     case state.mode do
       {:buffer, limit} -> {:buffer, limit, state}
+      :bad_headers -> {:stream, [{"x-bad", "value\r\ninjected: true"}], state}
       :reject -> {:error, :unsupported_encoding, state}
       _ -> {:stream, [{"x-processed", "yes"} | headers], state}
     end

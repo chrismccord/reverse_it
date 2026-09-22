@@ -120,8 +120,6 @@ defmodule ReverseIt do
     * `:name` (required) - Name of the Finch pool to use
     * `:backend` (required) - Backend URL (http://, https://, ws://, or wss://)
     * `:connect_ip` - Vetted IPv4/IPv6 tuple to dial while retaining the backend hostname for TLS and HTTP; requires `:one_shot` and cannot be combined with `:unix_socket`
-    * `:request_body` - Already-read binary request body; `nil` reads from the conn (default). Size limits still apply and Content-Length is recalculated.
-    * `:response_handler` - `{module, initial_state}` implementing `ReverseIt.ResponseHandler` for HTTP response inspection, transformation, or bounded buffering (default: `nil`)
     * `:unix_socket` - Connect through this Unix-domain socket instead of the backend host/port
     * `:upstream_connection` - `:pooled` or `:one_shot` (default: `:pooled`)
     * `:strip_path` - Path prefix to strip from incoming requests before proxying
@@ -235,7 +233,16 @@ defmodule ReverseIt do
   @behaviour Plug
 
   require Logger
-  alias ReverseIt.{Config, Headers, HTTPProxy, WebSocketHandshake, WebSocketProxy}
+
+  alias ReverseIt.{
+    Config,
+    Headers,
+    HTTPProxy,
+    RequestOptions,
+    ResponseStream,
+    WebSocketHandshake,
+    WebSocketProxy
+  }
 
   @doc """
   Child spec for starting ReverseIt with a Finch connection pool.
@@ -339,29 +346,42 @@ defmodule ReverseIt do
   for a failure before commitment. After commitment failures exit the request
   process to abort the downstream response. WebSocket upgrades are rejected.
 
-  Set `request_body` in the config to forward bytes already read and validated
-  by the caller, and `response_handler: {module, state}` to choose buffering or
-  stream processing. See `ReverseIt.ResponseHandler`. Buffered/error results
-  leave the response unsent so the caller can retry or send its own response.
+  The optional third argument accepts per-request options:
+
+    * `:request_body` - Already-read binary bytes to forward, including `""`.
+      `nil` (the default) reads the body from the conn. Body limits still apply.
+    * `:response_handler` - `{module, initial_state}` for response processing.
+      `nil` (the default) streams the response unchanged.
+
+  Initialize the static config once, then pass fresh options for each request.
+  These options are rejected by `init/1`; handler modules are checked at request
+  time rather than while the router is compiling. See `ReverseIt.ResponseHandler`
+  for the callback contract. Buffered/error results leave the response unsent so
+  the caller can retry or send its own response.
   Only replay explicitly supplied bodies; the original conn body is consumed.
   """
-  @spec request(Plug.Conn.t(), Config.t()) ::
+  @spec request(Plug.Conn.t(), Config.t(), keyword()) ::
           {:ok, Plug.Conn.t(), term()}
           | {:buffered, map(), Plug.Conn.t(), term()}
           | {:error, term(), Plug.Conn.t(), term()}
-  def request(conn, %Config{} = config) do
+  def request(conn, %Config{} = config, opts \\ []) do
+    request_options = RequestOptions.parse!(opts)
+
     with :ok <- Headers.validate_client_request(conn, config),
          false <- websocket_upgrade?(conn) do
-      HTTPProxy.request(conn, config)
+      HTTPProxy.request(conn, config, request_options)
     else
       true ->
-        ReverseIt.ResponseStream.fail(
-          ReverseIt.ResponseStream.new(conn, config),
+        ResponseStream.fail(
+          ResponseStream.new(conn, config, request_options.response_handler),
           :websocket_not_supported
         )
 
       {:error, reason} ->
-        ReverseIt.ResponseStream.fail(ReverseIt.ResponseStream.new(conn, config), reason)
+        ResponseStream.fail(
+          ResponseStream.new(conn, config, request_options.response_handler),
+          reason
+        )
     end
   end
 
