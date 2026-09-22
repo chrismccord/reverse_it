@@ -343,7 +343,8 @@ defmodule ReverseIt do
   Returns `{:ok, conn, handler_state}` for a sent/streamed response,
   `{:buffered, %{status: status, headers: headers, body: body}, conn, handler_state}`
   for an unsent buffered response, or `{:error, reason, conn, handler_state}`
-  for a failure before commitment. After commitment failures exit the request
+  for a failure before commitment. Returned errors are not logged; the caller
+  owns logging. After commitment, failures are logged and exit the request
   process to abort the downstream response. WebSocket upgrades are rejected.
 
   The optional third argument accepts per-request options:
@@ -383,6 +384,27 @@ defmodule ReverseIt do
           reason
         )
     end
+  end
+
+  @doc """
+  Sends a buffered response returned by `request/3`, without halting the conn.
+
+  Replaces existing response headers, including Plug's default Cache-Control,
+  while preserving repeated upstream headers such as Set-Cookie. Registered
+  `Plug.Conn.register_before_send/2` callbacks still run.
+
+  If you change the buffered body, update its representation headers (such as
+  Content-Length and Content-Encoding) before sending it.
+  """
+  @spec send_buffered(Plug.Conn.t(), %{
+          status: pos_integer(),
+          headers: [{String.t(), String.t()}],
+          body: binary()
+        }) :: Plug.Conn.t()
+  def send_buffered(conn, %{status: status, headers: headers, body: body}) do
+    conn
+    |> Headers.put_response_headers(headers)
+    |> Plug.Conn.send_resp(status, body)
   end
 
   # Private functions

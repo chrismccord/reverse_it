@@ -197,8 +197,10 @@ defmodule ReverseIt.HTTPProxy do
   defp send_proxy_error(conn, _config, :invalid_content_length),
     do: send_error_response(conn, 400, "Bad Request")
 
-  defp send_proxy_error(conn, _config, {:response_headers, _reason}),
-    do: send_error_response(conn, 504, "Gateway Timeout")
+  defp send_proxy_error(conn, _config, {:response_headers, _} = reason) do
+    Logger.error("Failed to proxy HTTP response (before commitment): #{inspect(reason)}")
+    send_error_response(conn, 504, "Gateway Timeout")
+  end
 
   defp send_proxy_error(conn, _config, :response_buffer_too_large),
     do: send_error_response(conn, 502, "Bad Gateway: Response buffer too large")
@@ -223,7 +225,8 @@ defmodule ReverseIt.HTTPProxy do
     send_error_response(conn, 400, "Bad Request")
   end
 
-  defp send_proxy_error(conn, config, _reason) do
+  defp send_proxy_error(conn, config, reason) do
+    Logger.error("Failed to proxy HTTP response (before commitment): #{inspect(reason)}")
     send_configured_bad_gateway(conn, config)
   end
 

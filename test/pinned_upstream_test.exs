@@ -1,6 +1,7 @@
 defmodule ReverseIt.PinnedUpstreamTest do
   # TLS tests temporarily install a test trust store, restoring the original.
   use ExUnit.Case, async: false
+  @moduletag :capture_log
 
   test "pinning requires a valid address, one-shot transport, and no Unix socket" do
     for opts <- [

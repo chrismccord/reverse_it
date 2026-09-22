@@ -202,8 +202,7 @@ case ReverseIt.request(conn, config, request_opts) do
     # Still unsent: inspect response.status/body, rewrite it, or decide whether
     # this operation is safe to retry using the same explicitly supplied body.
     conn
-    |> Plug.Conn.merge_resp_headers(response.headers)
-    |> Plug.Conn.send_resp(response.status, response.body)
+    |> ReverseIt.send_buffered(response)
     |> Plug.Conn.halt()
 
   {:error, _reason, conn, _state} ->
@@ -221,12 +220,19 @@ initializing a router does not depend on their compilation order.
 
 ### Per-request options (`request/3`)
 
-- `:request_body` — Already-read binary bytes, including `""`. Defaults to `nil`, which reads from the conn.
-- `:response_handler` — `{module, initial_state}` implementing `ReverseIt.ResponseHandler`. Defaults to `nil`, which forwards the response unchanged.
+- `:request_body` — Already-read binary bytes, including `""`.
+  Defaults to `nil`, which reads from the conn.
+- `:response_handler` — `{module, initial_state}` implementing
+  `ReverseIt.ResponseHandler`. Defaults to `nil`, which forwards the response
+  unchanged.
 
 Omitting the third argument is equivalent to passing `[]`. Unlike the Plug entry
 point, `request/3` leaves halting the conn and sending buffered/error results to
-the caller.
+the caller. `ReverseIt.send_buffered/2` sends a buffered result while preserving
+repeated headers such as Set-Cookie and replacing Plug's default response
+headers. It runs registered before-send callbacks and leaves halting to the
+caller. If you rewrite the body, update its representation headers before
+sending it.
 
 The required `handle_headers/3` callback chooses streaming, finite buffering, or
 `{:error, reason, state}` before commitment. Optional `handle_data/2` and
@@ -240,19 +246,27 @@ final state. Downstream write failures use `{:downstream, reason}`. Callback
 exceptions propagate; `terminate/2` is not guaranteed for programming errors or
 process termination. It should be a lightweight observer and must not raise.
 
-The same callbacks run for pooled and one-shot HTTP. Proxy failures are logged
-once, before returning an error or aborting a committed stream. Handled streams
-drop the upstream Content-Length when a body is allowed. Both received and emitted bytes obey
-`max_response_body_size`. Buffering additionally requires its own finite limit.
+The same callbacks run for pooled and one-shot HTTP. Errors returned by
+`request/3` are not logged; callers choose how to log them. Failures after
+commitment are logged once before the stream is aborted. Handled streams drop
+the upstream Content-Length when a body is allowed. Both received and emitted
+bytes obey `max_response_body_size`. Buffering also requires its own finite
+limit.
 Header filtering/validation remains enforced before and after header callbacks.
 The proxy does not decompress responses; handlers can reject unsupported encodings
 before sending anything. HTTP/1 is recommended for synchronous backpressure.
 
-Handled streams commit the response when a callback first emits nonempty bytes.
+By default, handled streams commit when a callback first emits nonempty bytes.
 If all output is empty, commitment waits for a successful end callback. This rule
 is the same for finite and infinite response limits, so a first-chunk rejection
-can always return an unsent error. Headers are handled only once; informational
-responses and trailers do not rerun the header callback.
+returns an unsent error. Headers are handled only once; informational responses
+and trailers do not rerun the header callback.
+
+For quiet SSE or long-polling responses, `handle_headers/3` can return
+`{:stream, headers, state, commit: :headers}` to send the validated status and
+headers immediately. This avoids waiting for a body chunk before a load balancer
+sees the response. With this opt-in, even a first-chunk rejection aborts the
+response because its headers have already been sent.
 
 After commitment, transport or callback-reported failures abort the downstream
 stream rather than completing a truncated body. Never catch and convert such an

@@ -13,11 +13,14 @@ defmodule ReverseIt.ResponseHandler do
   can inspect or replace them and decide whether the request is safe to retry.
   Streaming callbacks can observe bytes, transform them, or reject them.
 
-  For handled streams, headers are sent with the first nonempty output from a
-  data or end callback. If no bytes are emitted, the response is sent only after
-  the end callback succeeds. This rule is independent of response size limits.
-  An error before that point is returned to the caller. An error after that point
-  exits the request process to abort the downstream response.
+  By default, handled streams send headers with the first nonempty output from
+  a data or end callback. If no bytes are emitted, the response is sent only
+  after the end callback succeeds. This is independent of response size limits.
+  For quiet SSE or long-polling responses, the header callback can instead return
+  `{:stream, headers, state, commit: :headers}` to send headers immediately.
+
+  Before headers are sent, errors are returned to the caller. After headers are
+  sent, errors exit the request process to abort the downstream response.
 
   Callbacks run synchronously in the requesting process. HTTP/1 upstreams provide
   synchronous downstream backpressure; HTTP/2 pools may queue incoming data.
@@ -40,12 +43,19 @@ defmodule ReverseIt.ResponseHandler do
   Streaming responses discard Content-Length when a body is allowed, since the
   data callbacks may change the number of bytes emitted.
 
+  Return `{:stream, headers, state, commit: :headers}` to send the status and
+  validated headers immediately, even if no body bytes have arrived. This can
+  avoid downstream header timeouts for quiet streams. Any later failure,
+  including rejection of the first data chunk, aborts the response instead of
+  returning an unsent error. Bodyless responses are sent immediately as well.
+
   The buffer limit and `max_response_body_size` both apply. The proxy does not
   decompress responses; reject unsupported encodings here if processing requires
   identity bytes.
   """
   @callback handle_headers(pos_integer(), headers(), term()) ::
               {:stream, headers(), term()}
+              | {:stream, headers(), term(), [commit: :headers]}
               | {:buffer, non_neg_integer(), term()}
               | {:error, term(), term()}
 
@@ -53,8 +63,9 @@ defmodule ReverseIt.ResponseHandler do
   Processes a transport chunk in stream mode.
 
   Return `{:ok, iodata, state}` to emit bytes, or `{:error, reason, state}` to
-  stop. Empty output delays commitment. Chunks need not contain complete JSON
-  or SSE events, so applications must bound any framing state they retain.
+  stop. Empty output delays commitment unless `commit: :headers` was selected.
+  Chunks need not contain complete JSON or SSE events, so applications must bound
+  any framing state they retain.
   Both received and emitted bytes obey `max_response_body_size`.
 
   Optional; the default forwards bytes unchanged. Not called in buffer mode
@@ -78,8 +89,9 @@ defmodule ReverseIt.ResponseHandler do
 
   Outcomes are `:ok` for a completed stream, `:buffered` for a response returned
   unsent, and `{:error, reason}` for failure. Downstream write failures use
-  `{:error, {:downstream, reason}}`. Errors are logged once by the proxy before
-  this callback runs, including errors after commitment.
+  `{:error, {:downstream, reason}}`. Errors before commitment are returned
+  without logging; callers own their logging policy. Errors after commitment
+  are logged once by the proxy before this callback runs and the process exits.
 
   Optional. Keep this callback lightweight and do not raise. Callback exceptions
   propagate as programming errors; this notification is not guaranteed when a

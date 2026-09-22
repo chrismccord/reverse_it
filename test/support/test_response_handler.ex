@@ -5,11 +5,17 @@ defmodule ReverseIt.TestResponseHandler do
   def handle_headers(status, headers, state) do
     send(state.owner, {:headers, status, headers})
 
-    case state.mode do
-      {:buffer, limit} -> {:buffer, limit, state}
-      :bad_headers -> {:stream, [{"x-bad", "value\r\ninjected: true"}], state}
-      :reject -> {:error, :unsupported_encoding, state}
-      _ -> {:stream, [{"x-processed", "yes"} | headers], state}
+    result =
+      case state.mode do
+        {:buffer, limit} -> {:buffer, limit, state}
+        :bad_headers -> {:stream, [{"x-bad", "value\r\ninjected: true"}], state}
+        :reject -> {:error, :unsupported_encoding, state}
+        _ -> {:stream, [{"x-processed", "yes"} | headers], state}
+      end
+
+    case {result, Map.get(state, :commit)} do
+      {{:stream, headers, state}, :headers} -> {:stream, headers, state, commit: :headers}
+      _ -> result
     end
   end
 

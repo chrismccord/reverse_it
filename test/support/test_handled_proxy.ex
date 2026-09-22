@@ -10,9 +10,7 @@ defmodule ReverseIt.TestHandledProxy do
           conn
 
         {:buffered, response, conn, _state} ->
-          conn
-          |> Plug.Conn.merge_resp_headers(response.headers)
-          |> Plug.Conn.send_resp(response.status, response.body)
+          ReverseIt.send_buffered(conn, response)
 
         {:error, _reason, conn, _state} ->
           Plug.Conn.send_resp(conn, 502, "proxy failed")

@@ -103,8 +103,10 @@ defmodule ReverseIt.ResponseStream do
   end
 
   def fail(acc, reason) do
-    phase = if acc.sent?, do: "after commitment", else: "before commitment"
-    Logger.error("Failed to proxy HTTP response (#{phase}): #{inspect(reason)}")
+    if acc.sent? do
+      Logger.error("Failed to proxy HTTP response (after commitment): #{inspect(reason)}")
+    end
+
     notify(acc, {:error, reason})
 
     if acc.sent? do
@@ -125,13 +127,10 @@ defmodule ReverseIt.ResponseStream do
   defp prepare(acc) do
     case acc.handler.handle_headers(acc.status, acc.headers, acc.handler_state) do
       {:stream, headers, state} ->
-        # A transforming stream must never retain an upstream byte count.
-        header_mode = if send_body?(acc), do: :bodyless, else: header_mode(acc)
+        prepare_stream(acc, headers, state, :output)
 
-        case Headers.response_headers(headers, acc.config, mode: header_mode) do
-          {:ok, headers} -> {:cont, %{acc | headers: headers, handler_state: state}}
-          {:error, reason} -> halt(%{acc | handler_state: state}, reason)
-        end
+      {:stream, headers, state, commit: :headers} ->
+        prepare_stream(acc, headers, state, :headers)
 
       {:buffer, limit, state} when is_integer(limit) and limit >= 0 ->
         acc = %{acc | response_mode: :buffer, buffer_limit: limit, handler_state: state}
@@ -144,6 +143,22 @@ defmodule ReverseIt.ResponseStream do
 
       {:error, reason, state} ->
         halt(%{acc | handler_state: state}, reason)
+    end
+  end
+
+  defp prepare_stream(acc, headers, state, commitment) do
+    # A transforming stream must never retain an upstream byte count.
+    mode = if send_body?(acc), do: :bodyless, else: header_mode(acc)
+    acc = %{acc | handler_state: state}
+
+    case Headers.response_headers(headers, acc.config, mode: mode) do
+      {:ok, headers} ->
+        acc = %{acc | headers: headers}
+        acc = if commitment == :headers, do: finish_response(acc), else: acc
+        {:cont, acc}
+
+      {:error, reason} ->
+        halt(acc, reason)
     end
   end
 
@@ -190,6 +205,8 @@ defmodule ReverseIt.ResponseStream do
 
     {:cont, %{acc | conn: conn, sent?: true}}
   end
+
+  defp finish_response(%{sent?: true} = acc), do: acc
 
   defp finish_response(acc) do
     if send_body?(acc) do

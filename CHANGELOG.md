@@ -23,30 +23,35 @@ resource limits; review the upgrade notes before deploying.
 - Use Bandit 1.12.2 or newer when response compression is enabled. Older versions
   can compress a length-delimited response stream without updating its declared
   `Content-Length`.
+- HTTP proxy error logs now use `Failed to proxy HTTP response` with either
+  `(before commitment)` or `(after commitment)`, replacing messages such as
+  `Failed to proxy response`. Update log-based alerts that match the old text.
+  Client validation rejections remain silent. The new `request/3` API returns
+  pre-commit errors without logging; callers choose how to log returned errors.
 
 ### HTTP extension API
 
 - Add `ReverseIt.request/3`, returning unsent buffered responses and pre-commit
-  errors for application-owned processing and retry decisions.
-- Add the per-request `response_handler: {module, state}` option with header selection, streaming data,
-  end-of-stream, and lifecycle callbacks shared by pooled and one-shot HTTP.
-  Buffers require finite limits; transformed streams discard upstream length
-  headers and enforce the response byte limit on received and emitted data.
-- Add the per-request `request_body` option for already-read binary bodies, retaining body limits and
-  recalculating request framing.
+  errors for application-owned processing, logging, and retry decisions.
+- Add the per-request `response_handler: {module, state}` option with streaming
+  data, end-of-stream, and lifecycle callbacks shared by pooled and one-shot
+  HTTP. The header callback runs once for the final response, excluding
+  trailers.
+  Handled streams commit on first emitted bytes or successful completion, with
+  an opt-in `commit: :headers` result for immediately sending quiet streams'
+  headers. Both modes enforce response limits on received and emitted bytes.
+- Buffers require finite limits. Transformed streams discard upstream body
+  length headers; buffered and streamed bodyless responses normalize them alike.
+  Add `ReverseIt.send_buffered/2` to preserve repeated buffered response headers.
+- Add the per-request `request_body` option for already-read binary bodies,
+  retaining body limits and recalculating request framing. Keep request data out
+  of static Plug configuration; validate handler modules at request time.
 - Add `connect_ip` for vetted IPv4/IPv6 destinations while retaining the backend
   hostname for TLS verification, SNI, and HTTP authority. Initially restricted to
   one-shot connections so pins cannot be bypassed through connection-pool reuse.
 - Close direct upstream sockets even if a response handler raises or a committed
   downstream stream is aborted. Handled requests disable automatic header retries;
   applications own retries before downstream commitment.
-
-- Keep request data out of static Plug configuration. Handler validation happens
-  at request time, avoiding parallel compiler ordering dependencies.
-- Invoke handled response headers once, ignoring trailers, and commit handled
-  streams on first emitted bytes regardless of the response size limit. Strip
-  representation lengths from buffered bodyless responses as well as streamed ones.
-- Log HTTP proxy failures once, including header timeouts and post-commit failures.
 
 ### HTTP fixes
 
