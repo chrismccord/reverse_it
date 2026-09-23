@@ -179,7 +179,7 @@ defmodule ReverseIt.HTTPProxy do
         ResponseStream.finish(acc)
 
       {:error, reason, acc} ->
-        if is_nil(acc.handler) and not acc.sent? and not acc.failed? and
+        if is_nil(acc.handler) and not acc.sent? and is_nil(acc.failure) and
              retry_response_headers?(acc.method, reason, retries_left) do
           stream_response_with_finch(
             acc.conn,
@@ -285,7 +285,7 @@ defmodule ReverseIt.HTTPProxy do
         continue_request_body(acc, conn, chunk, true)
 
       {:error, reason} ->
-        {:halt, %{acc | failed?: true, error: {:request_body_read_failed, reason}}}
+        {:halt, %{acc | failure: {:error, {:request_body_read_failed, reason}}}}
     end
   end
 
@@ -301,7 +301,7 @@ defmodule ReverseIt.HTTPProxy do
         {:data, chunk, acc}
 
       {:error, :request_body_too_large} ->
-        {:halt, %{acc | failed?: true, error: :request_body_too_large}}
+        {:halt, %{acc | failure: {:error, :request_body_too_large}}}
     end
   end
 
@@ -432,7 +432,7 @@ defmodule ReverseIt.HTTPProxy do
         case process_responses(acc, responses, ref) do
           {:cont, acc} -> receive_response(acc, mint_conn, ref)
           {:done, acc} -> ResponseStream.finish(acc)
-          {:halt, acc} -> ResponseStream.fail(acc, acc.error)
+          {:halt, %{failure: {:error, reason}} = acc} -> ResponseStream.fail(acc, reason)
         end
 
       {:error, _mint_conn, reason, responses} ->
@@ -447,7 +447,7 @@ defmodule ReverseIt.HTTPProxy do
   defp process_responses(acc, [{:done, ref} | _], ref), do: {:done, acc}
 
   defp process_responses(acc, [{:error, ref, reason} | _], ref),
-    do: {:halt, %{acc | failed?: true, error: mint_receive_error(acc, reason)}}
+    do: {:halt, %{acc | failure: {:error, mint_receive_error(acc, reason)}}}
 
   defp process_responses(acc, [{kind, ref, value} | rest], ref)
        when kind in [:status, :headers, :data, :trailers] do
