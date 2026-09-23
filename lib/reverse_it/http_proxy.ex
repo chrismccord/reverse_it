@@ -179,7 +179,7 @@ defmodule ReverseIt.HTTPProxy do
         ResponseStream.finish(acc)
 
       {:error, reason, acc} ->
-        if is_nil(acc.handler) and not acc.sent? and
+        if is_nil(acc.handler) and not acc.sent? and not acc.failed? and
              retry_response_headers?(acc.method, reason, retries_left) do
           stream_response_with_finch(
             acc.conn,
@@ -189,7 +189,7 @@ defmodule ReverseIt.HTTPProxy do
             retries_left - 1
           )
         else
-          ResponseStream.fail(acc, acc.error || reason)
+          ResponseStream.fail(acc, reason)
         end
     end
   end
@@ -285,7 +285,7 @@ defmodule ReverseIt.HTTPProxy do
         continue_request_body(acc, conn, chunk, true)
 
       {:error, reason} ->
-        {:halt, %{acc | error: {:request_body_read_failed, reason}}}
+        {:halt, %{acc | failed?: true, error: {:request_body_read_failed, reason}}}
     end
   end
 
@@ -294,9 +294,14 @@ defmodule ReverseIt.HTTPProxy do
     acc = %{acc | conn: conn, request_body_done?: done?, request_bytes: request_bytes}
 
     case ensure_request_body_limit(request_bytes, acc.config) do
-      :ok when chunk == "" and done? -> {:done, acc}
-      :ok -> {:data, chunk, acc}
-      {:error, :request_body_too_large} -> {:halt, %{acc | error: :request_body_too_large}}
+      :ok when chunk == "" and done? ->
+        {:done, acc}
+
+      :ok ->
+        {:data, chunk, acc}
+
+      {:error, :request_body_too_large} ->
+        {:halt, %{acc | failed?: true, error: :request_body_too_large}}
     end
   end
 
@@ -433,7 +438,7 @@ defmodule ReverseIt.HTTPProxy do
       {:error, _mint_conn, reason, responses} ->
         case process_responses(acc, responses, ref) do
           {:done, acc} -> ResponseStream.finish(acc)
-          {_, acc} -> ResponseStream.fail(acc, acc.error || mint_receive_error(acc, reason))
+          {_, acc} -> ResponseStream.fail(acc, mint_receive_error(acc, reason))
         end
     end
   end
@@ -442,7 +447,7 @@ defmodule ReverseIt.HTTPProxy do
   defp process_responses(acc, [{:done, ref} | _], ref), do: {:done, acc}
 
   defp process_responses(acc, [{:error, ref, reason} | _], ref),
-    do: {:halt, %{acc | error: mint_receive_error(acc, reason)}}
+    do: {:halt, %{acc | failed?: true, error: mint_receive_error(acc, reason)}}
 
   defp process_responses(acc, [{kind, ref, value} | rest], ref)
        when kind in [:status, :headers, :data, :trailers] do

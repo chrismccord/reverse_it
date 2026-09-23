@@ -13,6 +13,8 @@ defmodule ReverseIt.ResponseHandler do
   unsent to the caller, which can inspect or replace them and decide whether the
   request is safe to retry.
   Streaming callbacks can observe bytes, transform them, or reject them.
+  Error reasons pass through unchanged, including `nil` and `false`; an explicit
+  `{:error, reason, state}` always rejects the response.
   Failures during client validation, connection setup, or request-body reads
   can call `terminate/2` with the initial state before `handle_headers/3` runs.
 

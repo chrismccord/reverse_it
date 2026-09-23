@@ -66,15 +66,18 @@ defmodule ReverseIt.Headers do
   def response_headers(headers, config, opts \\ []) do
     mode = Keyword.get(opts, :mode, :identity)
 
-    headers =
-      headers
-      |> normalize_headers()
-      |> strip_hop_by_hop()
-      |> maybe_strip_content_headers(mode)
+    headers = normalize_headers(headers)
 
-    with :ok <- validate_header_block_size(headers, config.max_response_header_bytes),
-         :ok <- validate_headers(headers) do
-      {:ok, headers}
+    # Count the whole incoming block, including headers removed below.
+    with :ok <- validate_header_block_size(headers, config.max_response_header_bytes) do
+      headers =
+        headers
+        |> strip_hop_by_hop()
+        |> maybe_strip_content_headers(mode)
+
+      with :ok <- validate_headers(headers) do
+        {:ok, headers}
+      end
     end
   end
 

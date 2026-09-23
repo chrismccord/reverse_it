@@ -10,6 +10,7 @@ defmodule ReverseIt.TestResponseHandler do
         {:return, result} -> result
         {:buffer, limit} -> {:buffer, limit, state}
         :bad_headers -> {:stream, [{"x-bad", "value\r\ninjected: true"}], state}
+        {:reject, :headers, reason} -> {:error, reason, state}
         :reject -> {:error, :unsupported_encoding, state}
         _ -> {:stream, [{"x-processed", "yes"} | headers], state}
       end
@@ -41,6 +42,9 @@ defmodule ReverseIt.TestResponseHandler do
       :expand ->
         {:ok, [data, data], state}
 
+      {:reject, :data, reason} ->
+        {:error, reason, state}
+
       :reject_data ->
         {:error, :bad_data, state}
 
@@ -55,6 +59,8 @@ defmodule ReverseIt.TestResponseHandler do
   @impl true
   def handle_end(%{mode: :frames, pending: pending} = state) when pending != "",
     do: {:error, :incomplete_frame, state}
+
+  def handle_end(%{mode: {:reject, :end, reason}} = state), do: {:error, reason, state}
 
   def handle_end(%{mode: :suffix} = state), do: {:ok, "!", state}
   def handle_end(state), do: {:ok, "", state}

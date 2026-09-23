@@ -17,6 +17,7 @@ defmodule ReverseIt.ResponseStream do
       sent?: false,
       response_bytes: 0,
       output_bytes: 0,
+      failed?: false,
       error: nil,
       handler: handler,
       handler_state: state,
@@ -78,7 +79,7 @@ defmodule ReverseIt.ResponseStream do
 
   def event({:trailers, _}, acc), do: {:cont, acc}
 
-  def finish(%{error: reason} = acc) when not is_nil(reason), do: fail(acc, reason)
+  def finish(%{failed?: true, error: reason} = acc), do: fail(acc, reason)
   def finish(%{status: nil} = acc), do: fail(acc, :missing_response_status)
 
   def finish(%{response_mode: :buffer} = acc) do
@@ -104,6 +105,8 @@ defmodule ReverseIt.ResponseStream do
   end
 
   def fail(acc, reason) do
+    reason = if acc.failed?, do: acc.error, else: reason
+
     if acc.sent? do
       Logger.error("Failed to proxy HTTP response (after commitment): #{inspect(reason)}")
     end
@@ -251,7 +254,7 @@ defmodule ReverseIt.ResponseStream do
 
   defp header_mode(acc), do: if(send_body?(acc), do: :identity, else: :bodyless)
 
-  defp halt(acc, reason), do: {:halt, %{acc | error: reason}}
+  defp halt(acc, reason), do: {:halt, %{acc | failed?: true, error: reason}}
 
   defp send_body?(%{method: "HEAD"}), do: false
   defp send_body?(%{status: status}) when status in 100..199 or status in [204, 304], do: false

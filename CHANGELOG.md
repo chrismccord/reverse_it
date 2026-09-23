@@ -33,7 +33,8 @@ resource limits; review the upgrade notes before deploying.
 - Informational response headers, such as `103 Early Hints`, now undergo the
   same header validation and size limits as final responses before being
   discarded. Invalid or oversized interim headers fail the request; pooled
-  requests previously ignored those blocks without validation.
+  requests previously ignored those blocks without validation. Header size limits
+  count the whole incoming block before hop-by-hop filtering in both HTTP modes.
 - With a finite `max_response_body_size`, ordinary one-shot HTTP forwarding now
   defers downstream headers until body output or successful completion, matching
   pooled forwarding. A backend that pauses after headers leaves the client

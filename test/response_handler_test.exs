@@ -600,6 +600,66 @@ defmodule ReverseIt.ResponseHandlerTest do
       end
     end
 
+    test "#{mode}: response header limits include fields removed by filtering" do
+      for status <- [200, 103],
+          headers <- [
+            "Keep-Alive: " <> String.duplicate("x", 1000) <> "\r\n",
+            "Connection: x-drop\r\nX-Drop: " <> String.duplicate("x", 1000) <> "\r\n",
+            "Keep-Alive: " <>
+              String.duplicate("x", 40) <>
+              "\r\n" <>
+              "Connection: x-drop\r\nX-Drop: " <> String.duplicate("y", 40) <> "\r\n"
+          ] do
+        response = "HTTP/1.1 #{status} Response\r\n" <> headers <> "\r\n"
+
+        response =
+          if status == 103,
+            do: response <> "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n",
+            else: response
+
+        {port, _} = backend(response)
+
+        assert {:error, :response_headers_too_large, conn, state} =
+                 request(
+                   Plug.Test.conn(:get, "/"),
+                   config(@mode, port, :passthrough, max_response_header_bytes: 100)
+                 )
+
+        assert conn.state == :unset
+        assert_receive {:terminated, {:error, :response_headers_too_large}, ^state}
+        refute_receive {:headers, _, _}
+      end
+    end
+
+    test "#{mode}: nil and false callback rejections remain unsent failures" do
+      for phase <- [:headers, :data, :end], reason <- [nil, false] do
+        body = if phase == :end, do: "", else: "hello"
+
+        {port, _} =
+          backend("HTTP/1.1 200 OK\r\nContent-Length: #{byte_size(body)}\r\n\r\n" <> body)
+
+        assert {:error, ^reason, conn, state} =
+                 request(Plug.Test.conn(:get, "/"), config(@mode, port, {:reject, phase, reason}))
+
+        assert conn.state == :unset
+        assert_receive {:terminated, {:error, ^reason}, ^state}
+        refute_receive {:terminated, _, _}
+      end
+    end
+
+    test "#{mode}: nil and false callback rejections abort a committed response" do
+      for phase <- [:data, :end], reason <- [nil, false] do
+        {port, _} = backend("HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello")
+        opts = config(@mode, port, {:reject, phase, reason}, commit: :headers)
+
+        assert catch_exit(request(Plug.Test.conn(:get, "/"), opts)) ==
+                 {:upstream_stream_failed, reason}
+
+        assert_receive {:terminated, {:error, ^reason}, _}
+        refute_receive {:terminated, _, _}
+      end
+    end
+
     test "#{mode}: oversized Early Hints fail before the header callback" do
       {port, _} =
         backend(
