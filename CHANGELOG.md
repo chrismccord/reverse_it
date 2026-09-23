@@ -30,6 +30,16 @@ resource limits; review the upgrade notes before deploying.
   failures, such as client disconnects, are now silent too; these previously
   could log at error level. The new `request/3` API returns pre-commit errors
   without logging; callers choose how to log returned errors.
+- Informational response headers, such as `103 Early Hints`, now undergo the
+  same header validation and size limits as final responses before being
+  discarded. Invalid or oversized interim headers fail the request; pooled
+  requests previously ignored those blocks without validation.
+- With a finite `max_response_body_size`, ordinary one-shot HTTP forwarding now
+  defers downstream headers until body output or successful completion, matching
+  pooled forwarding. A backend that pauses after headers leaves the client
+  waiting until data arrives or `upstream_idle_timeout` expires. This allows a
+  clean error response before commitment. The default `:infinity` behavior
+  is unchanged.
 
 ### HTTP extension API
 

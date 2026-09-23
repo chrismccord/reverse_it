@@ -548,6 +548,108 @@ defmodule ReverseIt.ResponseHandlerTest do
       assert_receive {:terminated, {:error, :response_body_too_large}, _}
     end
 
+    test "#{mode}: continuation read failures return 400 quietly and close the upload" do
+      owner = self()
+      {:ok, listener} = :gen_tcp.listen(0, [:binary, active: false, ip: {127, 0, 0, 1}])
+      {:ok, port} = :inet.port(listener)
+      on_exit(fn -> :gen_tcp.close(listener) end)
+
+      start_supervised!(
+        {Task,
+         fn ->
+           for _ <- 1..2 do
+             {:ok, socket} = :gen_tcp.accept(listener)
+             send(owner, {:closed_upload, drain_upload(socket)})
+             :gen_tcp.close(socket)
+           end
+         end}
+      )
+
+      options = config(@mode, port, :passthrough, request_body_buffer_size: 5)
+
+      for api <- [:request, :plug] do
+        conn = Plug.Test.conn(:post, "/", "first-second")
+        {_, adapter_state} = conn.adapter
+
+        conn = %{
+          conn
+          | adapter: {ReverseIt.FailingUploadAdapter, Map.put(adapter_state, :test_owner, self())}
+        }
+
+        assert capture_log([level: :error], fn ->
+                 case api do
+                   :request ->
+                     assert {:error, {:request_body_read_failed, :closed}, conn, state} =
+                              request(conn, options)
+
+                     assert conn.state == :unset
+
+                     assert_receive {:terminated, {:error, {:request_body_read_failed, :closed}},
+                                     ^state}
+
+                     refute_receive {:headers, _, _}
+
+                   :plug ->
+                     assert ReverseIt.call(conn, elem(options, 0)).status == 400
+                 end
+               end) == ""
+
+        assert_receive :upload_read_failed
+        assert_receive {:closed_upload, upload}, 2000
+        assert upload =~ "first"
+      end
+    end
+
+    test "#{mode}: oversized Early Hints fail before the header callback" do
+      {port, _} =
+        backend(
+          "HTTP/1.1 103 Early Hints\r\nX-Hint: " <>
+            String.duplicate("x", 100) <> "\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"
+        )
+
+      assert {:error, :response_headers_too_large, conn, state} =
+               request(
+                 Plug.Test.conn(:get, "/"),
+                 config(@mode, port, :passthrough, max_response_header_bytes: 50)
+               )
+
+      assert conn.state == :unset
+      assert_receive {:terminated, {:error, :response_headers_too_large}, ^state}
+      refute_receive {:headers, _, _}
+    end
+
+    test "#{mode}: invalid header callback returns fail cleanly and run cleanup" do
+      for result <- [
+            :invalid,
+            {:stream, [], :new_state, commit: :unknown},
+            {:stream, :not_headers, :new_state},
+            {:buffer, :infinity, :new_state}
+          ] do
+        {port, _} = backend("HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello")
+
+        assert {:error, {:invalid_handler_return, :handle_headers}, conn, state} =
+                 request(Plug.Test.conn(:get, "/"), config(@mode, port, {:return, result}))
+
+        assert conn.state == :unset
+        assert state.mode == {:return, result}
+        assert_receive {:terminated, {:error, {:invalid_handler_return, :handle_headers}}, ^state}
+        refute_receive {:terminated, _, _}
+        refute_receive {:data, _}
+      end
+    end
+
+    test "#{mode}: a handler with no optional callbacks forwards the complete body" do
+      {port, _} = backend("HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello")
+      {config, _} = config(@mode, port, :passthrough)
+
+      assert {:ok, conn, :state} =
+               ReverseIt.request(Plug.Test.conn(:get, "/"), config,
+                 response_handler: {ReverseIt.HeadersOnlyHandler, :state}
+               )
+
+      assert conn.resp_body == "hello"
+    end
+
     test "#{mode}: client body errors stay quiet through both APIs" do
       {config, _} = config(@mode, 1, :passthrough, max_request_body_size: 4)
 
@@ -760,6 +862,13 @@ defmodule ReverseIt.ResponseHandlerTest do
 
       result ->
         flunk("HTTP/2 connection failed: #{inspect(result)}")
+    end
+  end
+
+  defp drain_upload(socket, data \\ "") do
+    case :gen_tcp.recv(socket, 0, 2000) do
+      {:ok, chunk} -> drain_upload(socket, data <> chunk)
+      {:error, :closed} -> data
     end
   end
 

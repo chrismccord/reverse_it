@@ -8,10 +8,13 @@ defmodule ReverseIt.ResponseHandler do
         response_handler: {MyApp.ResponseHandler, initial_state}
       )
 
-  The header callback chooses whether to stream the response or buffer it with
-  a finite limit. Buffered responses are returned unsent to the caller, which
-  can inspect or replace them and decide whether the request is safe to retry.
+  Once upstream headers arrive, the header callback chooses whether to stream
+  the response or buffer it with a finite limit. Buffered responses are returned
+  unsent to the caller, which can inspect or replace them and decide whether the
+  request is safe to retry.
   Streaming callbacks can observe bytes, transform them, or reject them.
+  Failures during client validation, connection setup, or request-body reads
+  can call `terminate/2` with the initial state before `handle_headers/3` runs.
 
   By default, handled streams send headers with the first nonempty output from
   a data or end callback. If no bytes are emitted, the response is sent only
@@ -50,6 +53,11 @@ defmodule ReverseIt.ResponseHandler do
   returning an unsent error. Bodyless responses are sent immediately as well.
   An empty options list or `commit: :output` keeps the default deferred behavior,
   equivalent to returning `{:stream, headers, state}`.
+
+  An invalid return shape or unknown commitment option produces
+  `{:error, {:invalid_handler_return, :handle_headers}, conn, initial_state}`
+  from `ReverseIt.request/3` and calls `terminate/2` with the state originally
+  passed to this callback. Exceptions raised by the callback still propagate.
 
   The buffer limit and `max_response_body_size` both apply. The proxy does not
   decompress responses; reject unsupported encodings here if processing requires
@@ -94,6 +102,8 @@ defmodule ReverseIt.ResponseHandler do
   `{:error, {:downstream, reason}}`. Errors before commitment are returned
   without logging; callers own their logging policy. Errors after commitment
   are logged once by the proxy before this callback runs and the process exits.
+  This callback can run before `handle_headers/3`, including on client validation,
+  connection, or request-body failures; in those cases it receives initial state.
 
   Optional. Keep this callback lightweight and do not raise. Callback exceptions
   propagate as programming errors; this notification is not guaranteed when a

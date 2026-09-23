@@ -244,9 +244,13 @@ Applications must bound their own parser state. Buffered responses skip data/end
 callbacks and return the original bytes for caller-owned processing.
 
 Optional `terminate/2` receives `:ok`, `:buffered`, or `{:error, reason}` and the
-final state. Downstream write failures use `{:downstream, reason}`. Callback
-exceptions propagate; `terminate/2` is not guaranteed for programming errors or
-process termination. It should be a lightweight observer and must not raise.
+final state. It can run with the initial state before `handle_headers/3` when
+client validation, connection setup, or request-body handling fails. Invalid
+header-callback returns produce `{:invalid_handler_return, :handle_headers}`
+and run cleanup with the original callback state. Downstream write failures
+use `{:downstream, reason}`. Callback exceptions propagate; `terminate/2` is not
+guaranteed for programming errors or process termination. It should be a
+lightweight observer and must not raise.
 
 The same callbacks run for pooled and one-shot HTTP. Errors returned by
 `request/3` are not logged; callers choose how to log them. Failures after

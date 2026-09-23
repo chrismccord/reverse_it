@@ -20,6 +20,7 @@ defmodule ReverseIt.ResponseStream do
       error: nil,
       handler: handler,
       handler_state: state,
+      callbacks: %{},
       response_mode: :stream,
       buffer_limit: nil,
       chunks: []
@@ -57,11 +58,11 @@ defmodule ReverseIt.ResponseStream do
     acc = %{acc | response_bytes: acc.response_bytes + byte_size(data)}
 
     cond do
-      not send_body?(acc) ->
-        {:cont, acc}
-
       exceeds?(acc.response_bytes, acc.config.max_response_body_size) ->
         halt(acc, :response_body_too_large)
+
+      not send_body?(acc) ->
+        {:cont, acc}
 
       acc.response_mode == :buffer ->
         if acc.response_bytes > acc.buffer_limit do
@@ -125,14 +126,22 @@ defmodule ReverseIt.ResponseStream do
   end
 
   defp prepare(acc) do
+    callbacks =
+      Map.new([handle_data: 2, handle_end: 1], fn {callback, arity} ->
+        {callback, function_exported?(acc.handler, callback, arity)}
+      end)
+
+    acc = %{acc | callbacks: callbacks}
+
     case acc.handler.handle_headers(acc.status, acc.headers, acc.handler_state) do
-      {:stream, headers, state} ->
+      {:stream, headers, state} when is_list(headers) ->
         prepare_stream(acc, headers, state, :output)
 
-      {:stream, headers, state, []} ->
+      {:stream, headers, state, []} when is_list(headers) ->
         prepare_stream(acc, headers, state, :output)
 
-      {:stream, headers, state, commit: commitment} when commitment in [:headers, :output] ->
+      {:stream, headers, state, commit: commitment}
+      when is_list(headers) and commitment in [:headers, :output] ->
         prepare_stream(acc, headers, state, commitment)
 
       {:buffer, limit, state} when is_integer(limit) and limit >= 0 ->
@@ -146,6 +155,9 @@ defmodule ReverseIt.ResponseStream do
 
       {:error, reason, state} ->
         halt(%{acc | handler_state: state}, reason)
+
+      _invalid ->
+        halt(acc, {:invalid_handler_return, :handle_headers})
     end
   end
 
@@ -167,7 +179,7 @@ defmodule ReverseIt.ResponseStream do
 
   defp transform(acc, callback, args) do
     result =
-      if acc.handler && function_exported?(acc.handler, callback, length(args) + 1) do
+      if acc.callbacks[callback] do
         apply(acc.handler, callback, args ++ [acc.handler_state])
       else
         {:ok, List.first(args) || "", acc.handler_state}

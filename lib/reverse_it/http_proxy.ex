@@ -396,7 +396,7 @@ defmodule ReverseIt.HTTPProxy do
         end
 
       {:error, reason} ->
-        {:error, reason}
+        {:error, {:request_body_read_failed, reason}}
     end
   end
 
