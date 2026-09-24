@@ -103,7 +103,9 @@ defmodule ReverseIt.ResponseHandler do
   unsent, and `{:error, reason}` for failure. Downstream write failures use
   `{:error, {:downstream, reason}}`. Errors before commitment are returned
   without logging; callers own their logging policy. Errors after commitment
-  are logged once by the proxy before this callback runs and the process exits.
+  are also not logged by the proxy: this callback receives the failure before
+  the request exits with `{:upstream_stream_failed, reason}`. Callers can ignore
+  routine client cancellations and report upstream failures exactly once.
   This callback can run before `handle_headers/3`, including on client validation,
   connection, or request-body failures; in those cases it receives initial state.
 

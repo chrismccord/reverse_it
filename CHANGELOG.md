@@ -29,7 +29,10 @@ resource limits; review the upgrade notes before deploying.
   Client size and header validation rejections remain silent. Request-body read
   failures, such as client disconnects, are now silent too; these previously
   could log at error level. The new `request/3` API returns pre-commit errors
-  without logging; callers choose how to log returned errors.
+  without logging; callers choose how to log returned errors. With a response
+  handler, post-commit failures are also silent: `terminate/2` receives the
+  error before the request exits, and the caller owns logging. This avoids
+  logging routine client cancellations and double-reporting upstream failures.
 - Informational response headers, such as `103 Early Hints`, now undergo the
   same header validation and size limits as final responses before being
   discarded. Invalid or oversized interim headers fail the request; pooled

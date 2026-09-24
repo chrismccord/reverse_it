@@ -253,8 +253,10 @@ guaranteed for programming errors or process termination. It should be a
 lightweight observer and must not raise.
 
 The same callbacks run for pooled and one-shot HTTP. Errors returned by
-`request/3` are not logged; callers choose how to log them. Failures after
-commitment are logged once before the stream is aborted. Handled streams drop
+`request/3` are not logged; callers choose how to log them. With a response
+handler, failures after commitment also leave logging to the caller: `terminate/2`
+receives the failure before the stream exits. Without a handler, ReverseIt logs
+post-commit failures once before aborting the stream. Handled streams drop
 the upstream Content-Length when a body is allowed. Both received and emitted
 bytes obey `max_response_body_size`. Buffering also requires its own finite
 limit.

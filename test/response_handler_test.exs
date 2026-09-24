@@ -309,8 +309,10 @@ defmodule ReverseIt.ResponseHandlerTest do
       {_, adapter_state} = conn.adapter
       conn = %{conn | adapter: {ReverseIt.DisconnectedAdapter, adapter_state}}
 
-      assert catch_exit(request(conn, config(@mode, port, :passthrough))) ==
-               {:upstream_stream_failed, {:downstream, :closed}}
+      assert capture_log(fn ->
+               assert catch_exit(request(conn, config(@mode, port, :passthrough))) ==
+                        {:upstream_stream_failed, {:downstream, :closed}}
+             end) == ""
 
       assert_receive {:terminated, {:error, {:downstream, :closed}}, %{bytes: 5}}
       assert_receive {:upstream_closed, {:error, :closed}}, 2000
@@ -409,8 +411,7 @@ defmodule ReverseIt.ResponseHandlerTest do
                      {:upstream_stream_failed, :bad_data}
           end)
 
-        assert length(Regex.scan(~r/Failed to proxy HTTP response/, log)) == 1
-        assert log =~ "after commitment"
+        assert log == ""
         assert_receive {:terminated, {:error, :bad_data}, %{bytes: 5}}
         refute_receive {:terminated, _, _}
       end
@@ -747,6 +748,20 @@ defmodule ReverseIt.ResponseHandlerTest do
       assert length(Regex.scan(~r/Failed to proxy HTTP response/, log)) == 1
       assert log =~ "before commitment"
       assert log =~ "econnrefused"
+    end
+
+    test "#{mode}: handled upstream failures leave logging to the caller" do
+      {port, _} = backend("HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nshort")
+
+      assert capture_log(fn ->
+               assert {:upstream_stream_failed, _} =
+                        catch_exit(
+                          request(Plug.Test.conn(:get, "/"), config(@mode, port, :passthrough))
+                        )
+             end) == ""
+
+      assert_receive {:terminated, {:error, _}, %{bytes: 5}}
+      refute_receive {:terminated, _, _}
     end
 
     test "#{mode}: committed upstream failures are logged once" do
