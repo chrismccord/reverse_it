@@ -411,8 +411,7 @@ defmodule ReverseIt.ResponseHandlerTest do
                      {:upstream_stream_failed, :bad_data}
           end)
 
-        assert length(Regex.scan(~r/Failed to proxy HTTP response/, log)) == 1
-        assert log =~ "after commitment"
+        assert log == ""
         assert_receive {:terminated, {:error, :bad_data}, %{bytes: 5}}
         refute_receive {:terminated, _, _}
       end
