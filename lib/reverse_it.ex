@@ -119,6 +119,7 @@ defmodule ReverseIt do
 
     * `:name` (required) - Name of the Finch pool to use
     * `:backend` (required) - Backend URL (http://, https://, ws://, or wss://)
+    * `:connect_ip` - Vetted IPv4/IPv6 tuple to dial while retaining the backend hostname for TLS and HTTP; requires `:one_shot` and cannot be combined with `:unix_socket`
     * `:unix_socket` - Connect through this Unix-domain socket instead of the backend host/port
     * `:upstream_connection` - `:pooled` or `:one_shot` (default: `:pooled`)
     * `:strip_path` - Path prefix to strip from incoming requests before proxying
@@ -232,7 +233,23 @@ defmodule ReverseIt do
   @behaviour Plug
 
   require Logger
-  alias ReverseIt.{Config, Headers, HTTPProxy, WebSocketHandshake, WebSocketProxy}
+
+  alias ReverseIt.{
+    Config,
+    Headers,
+    HTTPProxy,
+    RequestOptions,
+    ResponseStream,
+    WebSocketHandshake,
+    WebSocketProxy
+  }
+
+  @typedoc "A complete, unsent response returned by `request/3`."
+  @type buffered_response :: %{
+          status: pos_integer(),
+          headers: [{String.t(), String.t()}],
+          body: binary()
+        }
 
   @doc """
   Child spec for starting ReverseIt with a Finch connection pool.
@@ -325,6 +342,74 @@ defmodule ReverseIt do
 
     # Ensure the connection is halted after proxying
     Plug.Conn.halt(conn)
+  end
+
+  @doc """
+  Proxies HTTP with caller-owned response handling, without halting the conn.
+
+  Returns `{:ok, conn, handler_state}` for a sent/streamed response,
+  `{:buffered, %{status: status, headers: headers, body: body}, conn, handler_state}`
+  for an unsent buffered response, or `{:error, reason, conn, handler_state}`
+  for a failure before commitment. Returned errors are not logged; the caller
+  owns logging. After commitment, failures are logged and exit the request
+  process to abort the downstream response. WebSocket upgrades are rejected.
+
+  The optional third argument accepts per-request options:
+
+    * `:request_body` - Already-read binary bytes to forward, including `""`.
+      `nil` (the default) reads the body from the conn. Body limits still apply.
+    * `:response_handler` - `{module, initial_state}` for response processing.
+      `nil` (the default) streams the response unchanged.
+
+  Initialize the static config once, then pass fresh options for each request.
+  These options are rejected by `init/1`; handler modules are checked at request
+  time rather than while the router is compiling. See `ReverseIt.ResponseHandler`
+  for the callback contract. Buffered/error results leave the response unsent so
+  the caller can retry or send its own response.
+  Only replay explicitly supplied bodies; the original conn body is consumed.
+  """
+  @spec request(Plug.Conn.t(), Config.t(), keyword()) ::
+          {:ok, Plug.Conn.t(), term()}
+          | {:buffered, buffered_response(), Plug.Conn.t(), term()}
+          | {:error, term(), Plug.Conn.t(), term()}
+  def request(conn, %Config{} = config, opts \\ []) do
+    request_options = RequestOptions.parse!(opts)
+
+    with :ok <- Headers.validate_client_request(conn, config),
+         false <- websocket_upgrade?(conn) do
+      HTTPProxy.request(conn, config, request_options)
+    else
+      true ->
+        ResponseStream.fail(
+          ResponseStream.new(conn, config, request_options.response_handler),
+          :websocket_not_supported
+        )
+
+      {:error, reason} ->
+        ResponseStream.fail(
+          ResponseStream.new(conn, config, request_options.response_handler),
+          reason
+        )
+    end
+  end
+
+  @doc """
+  Sends a buffered response returned by `request/3`, without halting the conn.
+
+  Replaces existing response headers, including Plug's default Cache-Control,
+  while preserving repeated upstream headers such as Set-Cookie. Registered
+  `Plug.Conn.register_before_send/2` callbacks still run. Headers set by earlier
+  plugs, such as request IDs and CORS headers, are replaced too; restore those
+  headers in a `Plug.Conn.register_before_send/2` callback to retain them.
+
+  If you change the buffered body, update its representation headers (such as
+  Content-Length and Content-Encoding) before sending it.
+  """
+  @spec send_buffered(Plug.Conn.t(), buffered_response()) :: Plug.Conn.t()
+  def send_buffered(conn, %{status: status, headers: headers, body: body}) do
+    conn
+    |> Headers.put_response_headers(headers)
+    |> Plug.Conn.send_resp(status, body)
   end
 
   # Private functions

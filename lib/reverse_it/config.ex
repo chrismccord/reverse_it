@@ -16,6 +16,7 @@ defmodule ReverseIt.Config do
     :host,
     :port,
     :unix_socket,
+    :connect_ip,
     :upstream_connection,
     :path_prefix,
     :strip_path,
@@ -60,6 +61,7 @@ defmodule ReverseIt.Config do
           host: String.t(),
           port: non_neg_integer(),
           unix_socket: String.t() | nil,
+          connect_ip: :inet.ip_address() | nil,
           upstream_connection: :pooled | :one_shot,
           path_prefix: String.t() | nil,
           strip_path: String.t() | nil,
@@ -105,6 +107,7 @@ defmodule ReverseIt.Config do
 
     * `:name` - Name of the Finch pool to use (required)
     * `:backend` - Backend URL (required). Can be http://, https://, ws://, or wss://
+    * `:connect_ip` - Vetted IPv4/IPv6 tuple to dial while retaining the backend hostname for TLS and HTTP; requires `:one_shot` and cannot be combined with `:unix_socket`
     * `:unix_socket` - Connect to this Unix-domain socket instead of the backend host/port
     * `:upstream_connection` - `:pooled` or `:one_shot` (default: `:pooled`)
     * `:strip_path` - Path prefix to strip from incoming requests before proxying
@@ -148,7 +151,8 @@ defmodule ReverseIt.Config do
   """
   @spec parse(keyword()) :: {:ok, t()} | {:error, String.t()}
   def parse(opts) do
-    with {:ok, backend} <- fetch_backend(opts),
+    with :ok <- validate_static_options(opts),
+         {:ok, backend} <- fetch_backend(opts),
          {:ok, uri} <- parse_uri(backend),
          {:ok, scheme} <- validate_scheme(uri.scheme),
          {:ok, host} <- validate_host(uri.host),
@@ -231,13 +235,17 @@ defmodule ReverseIt.Config do
         send_timeout: config.upstream_send_timeout,
         send_timeout_close: true
       ]
-      |> maybe_enable_ipv6(config.host)
+      |> maybe_enable_ipv6(config.connect_ip || config.host)
 
     if config.scheme in [:https, :wss] and config.verify_tls == false do
       Keyword.put(opts, :verify, :verify_none)
     else
       opts
     end
+  end
+
+  defp maybe_enable_ipv6(opts, address) when is_tuple(address) do
+    if tuple_size(address) == 8, do: Keyword.put(opts, :inet6, true), else: opts
   end
 
   defp maybe_enable_ipv6(opts, host) do
@@ -250,7 +258,8 @@ defmodule ReverseIt.Config do
   # Private functions
 
   defp build_config(opts, name, scheme, host, port, uri) do
-    with {:ok, protocols} <- validate_protocols(Keyword.get(opts, :protocols, [:http1])),
+    with {:ok, connect_ip} <- validate_connect_ip(Keyword.get(opts, :connect_ip)),
+         {:ok, protocols} <- validate_protocols(Keyword.get(opts, :protocols, [:http1])),
          {:ok, add_headers} <- validate_add_headers(Keyword.get(opts, :add_headers, [])),
          {:ok, remove_headers} <- validate_remove_headers(Keyword.get(opts, :remove_headers, [])),
          {:ok, forwarded_headers} <-
@@ -264,6 +273,7 @@ defmodule ReverseIt.Config do
              host: host,
              port: port,
              unix_socket: Keyword.get(opts, :unix_socket),
+             connect_ip: connect_ip,
              upstream_connection: Keyword.get(opts, :upstream_connection, :pooled),
              path_prefix: normalize_path(uri.path),
              strip_path: normalize_path(opts[:strip_path]),
@@ -406,6 +416,12 @@ defmodule ReverseIt.Config do
 
   defp validate_connection_config(%__MODULE__{} = config) do
     cond do
+      not is_nil(config.connect_ip) and not is_nil(config.unix_socket) ->
+        {:error, "connect_ip and unix_socket are mutually exclusive"}
+
+      not is_nil(config.connect_ip) and config.upstream_connection != :one_shot ->
+        {:error, "connect_ip requires upstream_connection: :one_shot"}
+
       config.upstream_connection not in [:pooled, :one_shot] ->
         {:error, "upstream_connection must be :pooled or :one_shot"}
 
@@ -424,6 +440,25 @@ defmodule ReverseIt.Config do
 
       true ->
         :ok
+    end
+  end
+
+  defp validate_static_options(opts) do
+    if Keyword.has_key?(opts, :request_body) or Keyword.has_key?(opts, :response_handler) do
+      {:error,
+       "request_body and response_handler are per-request options; pass them to ReverseIt.request/3"}
+    else
+      :ok
+    end
+  end
+
+  defp validate_connect_ip(nil), do: {:ok, nil}
+
+  defp validate_connect_ip(address) do
+    if :inet.is_ip_address(address) do
+      {:ok, address}
+    else
+      {:error, "connect_ip must be an IPv4 or IPv6 address tuple"}
     end
   end
 
