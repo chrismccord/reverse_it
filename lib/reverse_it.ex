@@ -351,8 +351,10 @@ defmodule ReverseIt do
   `{:buffered, %{status: status, headers: headers, body: body}, conn, handler_state}`
   for an unsent buffered response, or `{:error, reason, conn, handler_state}`
   for a failure before commitment. Returned errors are not logged; the caller
-  owns logging. After commitment, failures are logged and exit the request
-  process to abort the downstream response. WebSocket upgrades are rejected.
+  owns logging. After commitment, failures exit the request process to abort
+  the downstream response. With a response handler, `terminate/2` receives the
+  failure before that exit and the caller owns logging; otherwise ReverseIt
+  logs the failure. WebSocket upgrades are rejected.
 
   The optional third argument accepts per-request options:
 

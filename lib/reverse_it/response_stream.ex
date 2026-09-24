@@ -110,7 +110,7 @@ defmodule ReverseIt.ResponseStream do
         {:error, failure_reason} -> failure_reason
       end
 
-    if acc.sent? do
+    if acc.sent? and is_nil(acc.handler) do
       Logger.error("Failed to proxy HTTP response (after commitment): #{inspect(reason)}")
     end
 
