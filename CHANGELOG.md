@@ -1,12 +1,18 @@
 # Changelog
 
-## v0.3.0 (Unreleased)
+## v0.3.0 (2026-09-24)
 
-Changes since v0.2.6. This minor release adds configuration options and stricter
-resource limits; review the upgrade notes before deploying.
+Changes since v0.2.6. This minor release adds application-controlled HTTP
+responses, pinned upstream connections, and stricter resource limits, alongside
+HTTP and WebSocket fixes. Review the upgrade notes before deploying.
 
 ### Upgrade notes
 
+- Require Mint 1.10.1 or newer within the 1.x series to address
+  [CVE-2026-82672](https://github.com/elixir-mint/mint/security/advisories/GHSA-rj5m-69wp-cxq9),
+  a chunk-size parsing issue that can enable response smuggling on pooled HTTP/1
+  connections through strict intermediaries. Update application lockfiles when
+  upgrading ReverseIt.
 - Backend WebSocket upgrade rejection bodies now have a separate 65,536-byte
   (64 KiB) buffering limit, even when `max_response_body_size` is `:infinity`.
   Set `max_websocket_upgrade_response_body_size` to a larger finite non-negative

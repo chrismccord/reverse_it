@@ -36,7 +36,7 @@ defmodule ReverseIt.MixProject do
     [
       {:plug, "~> 1.16"},
       {:finch, "~> 0.23"},
-      {:mint, "~> 1.6"},
+      {:mint, "~> 1.10 and >= 1.10.1"},
       {:mint_web_socket, "~> 1.0"},
       {:websock, "~> 0.5"},
       {:websock_adapter, "~> 0.5"},
