@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased
+
+### Upgrade notes
+
+- Require Mint 1.11 or newer within the 1.x series to address
+  [CVE-2026-91043](https://github.com/elixir-mint/mint/security/advisories/GHSA-9x8p-qrf4-jq7g)
+  and
+  [CVE-2026-92103](https://github.com/elixir-mint/mint/security/advisories/GHSA-q95c-ccq6-j5j6),
+  which let a malicious HTTP/2 server force large client allocations, and
+  [CVE-2026-94194](https://github.com/elixir-mint/mint/security/advisories/GHSA-gvrc-75rc-7gj9),
+  an HTTP/1 response framing issue on shared connections. Update application
+  lockfiles when upgrading ReverseIt.
+- Require Finch 0.24 or newer within the 0.x series. With Mint 1.11, receive
+  timeouts no longer close connections; Finch 0.24 closes pooled HTTP/1
+  connections after receive errors so stale responses cannot reach later
+  requests.
+- HTTP/2 backends that send status 101, or DATA on a `HEAD`, `204`, or `304`
+  response, now fail with a protocol error before downstream commitment, and
+  ReverseIt resets the upstream stream. Previously ReverseIt discarded that DATA
+  and failed only when it exceeded `max_response_body_size`. Response handlers
+  receive no body bytes, and `terminate/2` receives the error.
+
 ## v0.3.1 (2026-10-23)
 
 - Forward bodyless `GET` and `HEAD` requests without adding `Content-Length: 0`.
