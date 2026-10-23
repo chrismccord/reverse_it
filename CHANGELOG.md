@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.3.1 (2026-10-23)
+
+- Forward bodyless `GET` and `HEAD` requests without adding `Content-Length: 0`.
+  Upstreams that distinguish absent content from explicitly empty content could
+  reject the header ReverseIt added. Requests whose client sent body framing keep
+  it: an explicit `Content-Length` is forwarded, and an empty chunked body is
+  forwarded as `Content-Length: 0`. Payloads and other methods are unchanged.
+- Add `request_body: :none` to `ReverseIt.request/3` for callers that have
+  already read a bodyless request. It sends no body framing, does not read the
+  conn, and drops a stale `Content-Length` header. An empty binary still sends
+  `Content-Length: 0`. On `POST`, `PUT`, and `PATCH`, `:none` sends no length at
+  all, which some servers reject with `411 Length Required`.
+
 ## v0.3.0 (2026-09-24)
 
 Changes since v0.2.6. This minor release adds application-controlled HTTP
