@@ -28,7 +28,7 @@ defmodule ReverseIt.HTTPProxy do
       headers = Headers.request_headers(conn, config)
 
       headers =
-        if is_binary(request_options.request_body) do
+        if request_options.request_body != nil do
           Enum.reject(headers, fn {name, _} -> name == "content-length" end)
         else
           headers
@@ -37,6 +37,7 @@ defmodule ReverseIt.HTTPProxy do
       case read_request_body(conn, config, request_options) do
         {:ok, body, conn} ->
           if within_request_body_limit?(byte_size(body), config) do
+            body = upstream_body(body, conn, request_options)
             proxy_buffered_request(conn, url, headers, body, config, request_options)
           else
             request_error(conn, config, request_options, :request_body_too_large)
@@ -76,17 +77,35 @@ defmodule ReverseIt.HTTPProxy do
     end
   end
 
+  # :none is an already-known absence, unlike nil which reads the connection.
+  defp read_request_body(conn, _config, %{request_body: :none}), do: {:ok, "", conn}
+
   defp read_request_body(conn, _config, %{request_body: body}) when is_binary(body),
     do: {:ok, body, conn}
 
   defp read_request_body(conn, config, _options),
     do: Plug.Conn.read_body(conn, first_body_read_opts(config))
 
+  defp upstream_body(_body, _conn, %{request_body: :none}), do: nil
+
+  defp upstream_body("", %{method: method} = conn, %{request_body: nil})
+       when method in ["GET", "HEAD"] do
+    # Mint distinguishes no body (nil) from explicitly empty content ("").
+    # Keep explicit framing, but do not invent it for a bodyless request.
+    if Plug.Conn.get_req_header(conn, "content-length") == [] and
+         Plug.Conn.get_req_header(conn, "transfer-encoding") == [],
+       do: nil,
+       else: ""
+  end
+
+  defp upstream_body(body, _conn, _options), do: body
+
   defp request_error(conn, config, options, reason),
     do: ResponseStream.fail(ResponseStream.new(conn, config, options.response_handler), reason)
 
-  defp validate_content_length(_conn, _config, %{request_body: body}) when is_binary(body),
-    do: :ok
+  defp validate_content_length(_conn, _config, %{request_body: body})
+       when is_binary(body) or body == :none,
+       do: :ok
 
   defp validate_content_length(_conn, %{max_request_body_size: :infinity}, _options), do: :ok
 

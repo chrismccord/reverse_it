@@ -22,9 +22,9 @@ defmodule ReverseIt.RequestOptions do
     end
   end
 
-  defp validate_request_body(body) when is_binary(body) or is_nil(body), do: {:ok, body}
+  defp validate_request_body(body) when is_binary(body) or body in [nil, :none], do: {:ok, body}
 
-  defp validate_request_body(_body), do: {:error, "request_body must be a binary or nil"}
+  defp validate_request_body(_body), do: {:error, "request_body must be a binary, nil, or :none"}
 
   defp validate_response_handler(nil), do: {:ok, nil}
 

@@ -358,7 +358,9 @@ defmodule ReverseIt do
 
   The optional third argument accepts per-request options:
 
-    * `:request_body` - Already-read binary bytes to forward, including `""`.
+    * `:request_body` - Already-read binary bytes to forward, including `""`, or
+      `:none` to send no body without reading the conn. Unlike an empty binary,
+      `:none` does not add Content-Length: 0.
       `nil` (the default) reads the body from the conn. Body limits still apply.
     * `:response_handler` - `{module, initial_state}` for response processing.
       `nil` (the default) streams the response unchanged.

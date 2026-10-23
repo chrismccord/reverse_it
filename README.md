@@ -211,7 +211,10 @@ case ReverseIt.request(conn, config, request_opts) do
 end
 ```
 
-`request_body` accepts a binary, including `""`; `nil` keeps normal conn body
+`request_body` accepts a binary, including `""`, or `:none` to explicitly send no
+body without rereading the conn or synthesizing Content-Length: 0. Bodyless
+GET/HEAD requests read from the conn also omit Content-Length unless the client
+explicitly supplied body framing. `nil` keeps normal conn body
 reading/streaming. Explicit bodies still obey `max_request_body_size`, and their
 Content-Length is recalculated. Initialize the static config once and reuse it.
 Pass the body and fresh handler state in the third argument for each request;
@@ -220,7 +223,7 @@ initializing a router does not depend on their compilation order.
 
 ### Per-request options (`request/3`)
 
-- `:request_body` — Already-read binary bytes, including `""`.
+- `:request_body` — Already-read binary bytes, including `""`, or `:none` for no body.
   Defaults to `nil`, which reads from the conn.
 - `:response_handler` — `{module, initial_state}` implementing
   `ReverseIt.ResponseHandler`. Defaults to `nil`, which forwards the response
