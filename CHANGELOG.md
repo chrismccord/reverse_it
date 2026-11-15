@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Retry a pooled request once, for any method, when its upstream connection
+  fails to open (`:connect_retries`, default 1). Nothing was sent, so a `PUT` or
+  `POST` cannot be applied twice. ReverseIt tells a failed connect from a failed
+  read by Finch's `[:finch, :connect, :stop]` event, so a request that times out
+  after reaching the upstream is still not retried. Set `connect_retries: 0` for
+  the previous behavior.
+
 ## v0.3.1 (2026-10-23)
 
 - Forward bodyless `GET` and `HEAD` requests without adding `Content-Length: 0`.
