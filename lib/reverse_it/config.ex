@@ -24,6 +24,7 @@ defmodule ReverseIt.Config do
     :pool_timeout,
     :response_header_timeout,
     :response_header_retries,
+    :connect_retries,
     :upstream_idle_timeout,
     :upstream_send_timeout,
     :request_body_read_timeout,
@@ -69,6 +70,7 @@ defmodule ReverseIt.Config do
           pool_timeout: non_neg_integer(),
           response_header_timeout: non_neg_integer(),
           response_header_retries: non_neg_integer(),
+          connect_retries: non_neg_integer(),
           upstream_idle_timeout: non_neg_integer(),
           upstream_send_timeout: non_neg_integer(),
           request_body_read_timeout: non_neg_integer(),
@@ -115,6 +117,7 @@ defmodule ReverseIt.Config do
     * `:pool_timeout` - Finch pool checkout timeout in milliseconds (default: 5_000)
     * `:response_header_timeout` - Time to wait for backend response headers (default: 30_000)
     * `:response_header_retries` - Retries for replay-safe requests that fail before response headers (default: 0)
+    * `:connect_retries` - Retries, for any method, when a pooled upstream connection fails to open; nothing was sent (default: 1)
     * `:upstream_idle_timeout` - Rolling idle timeout for backend data (default: 55_000)
     * `:upstream_send_timeout` - Socket write timeout for direct HTTP/WebSocket connections (default: 55_000); configure on the supervisor child for pooled HTTP
     * `:request_body_read_timeout` - Rolling timeout while reading client request bodies (default: 55_000)
@@ -281,6 +284,7 @@ defmodule ReverseIt.Config do
              pool_timeout: Keyword.get(opts, :pool_timeout, 5_000),
              response_header_timeout: Keyword.get(opts, :response_header_timeout, 30_000),
              response_header_retries: Keyword.get(opts, :response_header_retries, 0),
+             connect_retries: Keyword.get(opts, :connect_retries, 1),
              upstream_idle_timeout: Keyword.get(opts, :upstream_idle_timeout, 55_000),
              upstream_send_timeout: Keyword.get(opts, :upstream_send_timeout, 55_000),
              request_body_read_timeout: Keyword.get(opts, :request_body_read_timeout, 55_000),
@@ -489,6 +493,7 @@ defmodule ReverseIt.Config do
       {:pool_timeout, :non_negative_integer},
       {:response_header_timeout, :non_negative_integer},
       {:response_header_retries, :non_negative_integer},
+      {:connect_retries, :non_negative_integer},
       {:upstream_idle_timeout, :non_negative_integer},
       {:upstream_send_timeout, :non_negative_integer},
       {:request_body_read_timeout, :non_negative_integer},
