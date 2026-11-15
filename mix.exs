@@ -35,8 +35,10 @@ defmodule ReverseIt.MixProject do
   defp deps do
     [
       {:plug, "~> 1.16"},
-      {:finch, "~> 0.23"},
-      {:telemetry, "~> 1.0"},
+      {:finch,
+       github: "chrismccord/finch",
+       ref: "dd5d464e580efd80a645ea00ea1408fbf919c667",
+       override: true},
       {:mint, "~> 1.10 and >= 1.10.1"},
       {:mint_web_socket, "~> 1.0"},
       {:websock, "~> 0.5"},

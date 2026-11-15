@@ -197,18 +197,13 @@ defmodule ReverseIt.HTTPProxy do
     config = acc.config
     opts = [pool_timeout: config.pool_timeout, receive_timeout: config.upstream_idle_timeout]
 
-    {result, connect_failed?} =
-      ReverseIt.ConnectWatch.run(config.name, fn ->
-        Finch.stream_while(request, config.name, acc, &ResponseStream.event/2, opts)
-      end)
-
-    case result do
+    case Finch.stream_while(request, config.name, acc, &ResponseStream.event/2, opts) do
       {:ok, acc} ->
         ResponseStream.finish(acc)
 
       # The upstream connection never opened, so nothing was sent: any method
       # can go again on a fresh connection.
-      {:error, _reason, acc} when connect_failed? and connect_retries_left > 0 ->
+      {:error, %Finch.TransportError{phase: :connect}, acc} when connect_retries_left > 0 ->
         do_stream_response_with_finch(request, acc, retries_left, connect_retries_left - 1)
 
       {:error, reason, acc} ->
