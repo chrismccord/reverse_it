@@ -1,7 +1,9 @@
 # Changelog
 
-## Unreleased
+## v0.3.2 (2026-11-19)
 
+- Require Finch `~> 0.25`, the first release that tags connect failures with
+  `phase: :connect`.
 - Retry a pooled request once, for any method, when its upstream connection
   fails to open (`:connect_retries`, default 1). Nothing was sent, so a `PUT` or
   `POST` cannot be applied twice. ReverseIt recognizes a failed connect by
